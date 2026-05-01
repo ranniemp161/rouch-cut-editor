@@ -6,6 +6,9 @@ class WordItem(BaseModel):
     start: float
     end: float
     probability: float
+    # Optional because older transcripts (pre semantic-cut work) lack these.
+    id: str | None = None
+    ai_cut: bool = False
 
 
 class AnalysisSegment(BaseModel):

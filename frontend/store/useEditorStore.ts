@@ -153,19 +153,30 @@ export const useEditorStore = create<EditorStore>((set) => ({
       reason: s.reason as TranscriptSegment["reason"],
       isCut: s.is_cut,
     }));
-    // Whisper output has no stable ID — generate one per word so the
-    // word-level click-to-cut UI can use it as a React key + Set member.
+
+    // Prefer the backend-assigned ID (Gemini's reference space). Fall back
+    // to a generated one only if older transcripts lack it.
     const transcript: WordTimestamp[] = words.map((w, i) => ({
-      id: `w-${i}`,
+      id: w.id ?? `w-${i}`,
       word: w.word,
       start: w.start,
       end: w.end,
     }));
+
+    // Seed the deletion set with whatever the AI editor flagged so those
+    // words appear struck-through immediately. The user can still toggle
+    // any of them back on with a click.
+    const deletedWordIds = new Set<string>(
+      transcript
+        .filter((_, i) => words[i].ai_cut === true)
+        .map((w) => w.id)
+    );
+
     set({
       analysisWords: words,
       segments,
       transcript,
-      deletedWordIds: new Set<string>(),
+      deletedWordIds,
       frameRate: meta.frameRate,
       totalFrames: meta.totalFrames,
       durationSeconds: meta.durationSeconds,

@@ -32,7 +32,9 @@ if _API_KEY:
 else:
     logger.warning("GEMINI_API_KEY not set — semantic_analyzer will return [] for every call")
 
-_MODEL_NAME = "gemini-1.5-flash"
+# Override via GEMINI_MODEL if Google retires this one. As of mid-2026 the 1.5
+# series is fully decommissioned; 2.5-flash is the current fast/cheap default.
+_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 _SYSTEM_INSTRUCTION = (
     "You are an expert, ruthless video editor. Analyze this raw transcript. "

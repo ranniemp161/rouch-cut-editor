@@ -23,7 +23,8 @@
       "Bash(python -c ' *)",
       "Bash(npx tsc *)",
       "Bash(curl -s \"http://localhost:8000/api/v1/media/883f64af-4277-4512-b6d6-33c30c527273/analysis?silence_threshold=0.5\" -o /tmp/analysis.json)",
-      "Bash(curl -s -X DELETE -w \"\\\\nHTTP %{http_code}\\\\n\" http://localhost:8000/api/v1/media/883f64af-4277-4512-b6d6-33c30c527273)"
+      "Bash(curl -s -X DELETE -w \"\\\\nHTTP %{http_code}\\\\n\" http://localhost:8000/api/v1/media/883f64af-4277-4512-b6d6-33c30c527273)",
+      "Bash(curl -s \"http://localhost:8000/api/v1/media/3cfa1f8a-f98c-4b51-ad4b-0c1390f81230/analysis?silence_threshold=0.5\")"
     ]
   }
 }
