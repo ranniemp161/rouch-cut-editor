@@ -87,15 +87,7 @@ export default function MainEditor() {
         />
 
         {showTranscript ? (
-          <TranscriptSidebar
-            segments={segments}
-            words={analysisWords}
-            silenceThreshold={silenceThreshold}
-            currentTime={player.currentTime}
-            onToggle={toggleSegment}
-            onThresholdChange={pipeline.reanalyze}
-            onSeek={player.seekTo}
-          />
+          <TranscriptSidebar />
         ) : (
           <Inspector mediaFile={mediaFile} duration={activeDuration} />
         )}

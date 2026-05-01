@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { WordItem, AnalysisSegment } from "@/lib/api";
+import type { WordTimestamp } from "@/types";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,13 +40,17 @@ interface EditorStore {
   uploadProgress: number;
   pipelineError: string | null;
 
-  // ── Analysis results ──────────────────────────────────────────────────────
+  // ── Analysis results (segment-level — silences + repetitions) ─────────────
   analysisWords: WordItem[];
-  segments: TranscriptSegment[];   // source of truth; user can toggle isCut
+  segments: TranscriptSegment[];
   silenceThreshold: number;
   frameRate: number;
   totalFrames: number;
   durationSeconds: number;
+
+  // ── Word-level transcript (Descript / Gling-style click-to-cut) ───────────
+  transcript: WordTimestamp[];
+  deletedWordIds: Set<string>;
 
   // ── Actions ───────────────────────────────────────────────────────────────
   login: (secret: string) => void;
@@ -58,6 +63,11 @@ interface EditorStore {
   toggleSegment: (startS: number) => void;
   setSilenceThreshold: (t: number) => void;
   clearMedia: () => void;
+
+  // Word-level actions
+  setTranscript: (words: WordTimestamp[]) => void;
+  toggleWordState: (wordId: string) => void;
+  resetDeletedWords: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -93,6 +103,11 @@ export const useEditorStore = create<EditorStore>((set) => ({
   totalFrames: 0,
   durationSeconds: 0,
 
+  transcript: [],
+  deletedWordIds: new Set<string>(),
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+
   login: (secret) => {
     if (secret !== VALID_SECRET) return;
     localStorage.setItem(LS_KEY, "true");
@@ -114,8 +129,12 @@ export const useEditorStore = create<EditorStore>((set) => ({
       pipelineError: null,
       analysisWords: [],
       segments: [],
+      transcript: [],
+      deletedWordIds: new Set<string>(),
     });
   },
+
+  // ── Pipeline / file ───────────────────────────────────────────────────────
 
   selectFile: (file) =>
     set({ mediaFile: file, pipelineStage: "file_selected", pipelineError: null }),
@@ -134,9 +153,19 @@ export const useEditorStore = create<EditorStore>((set) => ({
       reason: s.reason as TranscriptSegment["reason"],
       isCut: s.is_cut,
     }));
+    // Whisper output has no stable ID — generate one per word so the
+    // word-level click-to-cut UI can use it as a React key + Set member.
+    const transcript: WordTimestamp[] = words.map((w, i) => ({
+      id: `w-${i}`,
+      word: w.word,
+      start: w.start,
+      end: w.end,
+    }));
     set({
       analysisWords: words,
       segments,
+      transcript,
+      deletedWordIds: new Set<string>(),
       frameRate: meta.frameRate,
       totalFrames: meta.totalFrames,
       durationSeconds: meta.durationSeconds,
@@ -165,7 +194,29 @@ export const useEditorStore = create<EditorStore>((set) => ({
       segments: [],
       totalFrames: 0,
       durationSeconds: 0,
+      transcript: [],
+      deletedWordIds: new Set<string>(),
     }),
+
+  // ── Word-level (Descript-style) ──────────────────────────────────────────
+  // Replacing the Set is required for Zustand to detect the change.
+  // Mutating in-place would not trigger subscribed components to re-render.
+
+  setTranscript: (words) =>
+    set({ transcript: words, deletedWordIds: new Set<string>() }),
+
+  toggleWordState: (wordId) =>
+    set((s) => {
+      const next = new Set(s.deletedWordIds);
+      if (next.has(wordId)) {
+        next.delete(wordId);
+      } else {
+        next.add(wordId);
+      }
+      return { deletedWordIds: next };
+    }),
+
+  resetDeletedWords: () => set({ deletedWordIds: new Set<string>() }),
 }));
 
 export const rehydrateAuth = () => {

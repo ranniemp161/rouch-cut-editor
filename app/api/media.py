@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
@@ -7,7 +8,7 @@ from app.api.deps import SessionDep
 from app.models.media_asset import MediaAsset
 from app.models.transcript import Transcript
 from app.schemas.analysis import AnalysisResult, AnalysisSegment, WordItem
-from app.services import analysis_service, media_service
+from app.services import analysis_service, media_service, semantic_analyzer
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -31,10 +32,25 @@ async def upload_media(
             detail="Uploaded file must have a filename",
         )
 
-    # --- service call (mocked; will run ffprobe + Whisper in production) ---
+    # 1. ffprobe + Whisper
     transcript_data = await media_service.process_video(file)
+    words: list[dict] = transcript_data["word_level_data"]
 
-    # --- persist MediaAsset ---
+    # 2. Stamp each word with a stable string ID so Gemini can refer back to it.
+    for i, w in enumerate(words, start=1):
+        w["id"] = str(i)
+
+    # 3. Semantic cut suggestions from Gemini (best-effort; non-fatal).
+    #    Run in a thread-pool so the blocking SDK call doesn't stall the event loop.
+    loop = asyncio.get_event_loop()
+    ai_cut_ids: list[str] = await loop.run_in_executor(
+        None, semantic_analyzer.analyze_transcript_for_mistakes, words
+    )
+    cut_set = set(ai_cut_ids)
+    for w in words:
+        w["ai_cut"] = w["id"] in cut_set
+
+    # 4. Persist MediaAsset + Transcript in a single transaction.
     asset = MediaAsset(
         project_id=project_id,
         original_filename=file.filename,
@@ -43,12 +59,11 @@ async def upload_media(
         duration_seconds=transcript_data["duration_seconds"],
     )
     session.add(asset)
-    session.flush()  # write asset to get asset.id without committing yet
+    session.flush()
 
-    # --- persist Transcript (linked to asset in same transaction) ---
     transcript = Transcript(
         media_asset_id=asset.id,
-        word_level_data=transcript_data["word_level_data"],
+        word_level_data=words,
         silence_threshold_used=transcript_data["silence_threshold_used"],
     )
     session.add(transcript)
@@ -59,6 +74,7 @@ async def upload_media(
     return {
         "media_id": str(asset.id),
         "transcript_id": str(transcript.id),
+        "ai_cut_count": len(ai_cut_ids),
     }
 
 

@@ -7,3 +7,5 @@ python-multipart
 pydantic-settings
 ffmpeg-python
 faster-whisper
+google-generativeai
+pydantic
