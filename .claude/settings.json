@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m json.tool)",
+      "Read(//c/Users/USER/OneDrive/Desktop/Subi-Shop/**)",
+      "Bash(npx create-next-app@latest frontend --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(npx create-next-app@latest _next_temp --typescript --tailwind --eslint --app --no-src-dir --import-alias \"@/*\" --yes)",
+      "Bash(cp -r c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/nexttemp/public c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/frontend/)",
+      "Bash(cp -r c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/nexttemp/node_modules c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/frontend/)",
+      "Bash(npm install *)",
+      "Bash(npm run *)"
+    ]
+  }
+}

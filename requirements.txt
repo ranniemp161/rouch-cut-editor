@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+sqlmodel
+alembic
+psycopg2-binary
+python-multipart
+pydantic-settings
+ffmpeg-python
