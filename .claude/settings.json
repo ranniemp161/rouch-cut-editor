@@ -8,7 +8,17 @@
       "Bash(cp -r c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/nexttemp/public c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/frontend/)",
       "Bash(cp -r c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/nexttemp/node_modules c:/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/frontend/)",
       "Bash(npm install *)",
-      "Bash(npm run *)"
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:3000 -o /dev/null -w \"%{http_code}\")",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/auth/bootstrap -H 'Content-Type: application/json' -d '{\"api_key\":\"roughcut2025\",\"client_name\":\"Test Client\"}')",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/projects/ -H 'Content-Type: application/json' -d '{\"user_id\":\"ececcc9c-8291-4850-b13a-672e509ffdd4\",\"name\":\"Smoke Test Project\"}')",
+      "Bash(dd if=/dev/zero bs=1024 count=10)",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/exports/generate -H 'Content-Type: application/json' -d '{\"media_id\":\"aa654762-4f36-4c9a-8d52-210bb6c5ec7a\",\"silence_threshold\":0.5,\"handle_padding_frames\":5}')",
+      "Bash(docker compose *)",
+      "Bash(ffmpeg -f lavfi -i color=black:size=320x240:rate=24 -f lavfi -i sine=frequency=440:duration=3 -t 3 -c:v libx264 -c:a aac /tmp/smoke_test.mp4 -y)",
+      "Read(//tmp/**)",
+      "Bash(curl --version)",
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/exports/generate -H 'Content-Type: application/json' -d '{\"media_id\":\"407ce879-c31d-4413-8b29-a2555354727e\",\"silence_threshold\":0.5,\"handle_padding_frames\":5}')"
     ]
   }
 }

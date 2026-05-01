@@ -6,8 +6,12 @@ import {
   Scissors, FolderOpen, Settings, Upload, Play, Pause,
   SkipBack, SkipForward, ChevronLeft, ChevronRight,
   Volume2, LogOut, Film, Info, AlignJustify, Download,
+  Loader2, CheckCircle2, AlertCircle,
 } from "lucide-react";
-import { useEditorStore } from "@/store/useEditorStore";
+import { useEditorStore, type UploadStatus } from "@/store/useEditorStore";
+import {
+  bootstrapUser, createProject, uploadMedia, generateExport, downloadFile,
+} from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,17 +25,57 @@ const toTC = (seconds: number, fps = 23.976): string => {
   return [h, m, s, f].map((n) => String(n).padStart(2, "0")).join(":");
 };
 
-const formatSize = (bytes: number): string => {
-  if (bytes < 1_000_000) return `${(bytes / 1000).toFixed(0)} KB`;
-  return `${(bytes / 1_000_000).toFixed(1)} MB`;
-};
+const formatSize = (bytes: number) =>
+  bytes < 1_000_000 ? `${(bytes / 1000).toFixed(0)} KB` : `${(bytes / 1_000_000).toFixed(1)} MB`;
+
+// ---------------------------------------------------------------------------
+// Upload status badge
+// ---------------------------------------------------------------------------
+
+function UploadBadge({ status, progress }: { status: UploadStatus; progress: number }) {
+  if (status === "idle") return null;
+
+  const map: Record<UploadStatus, { icon: React.ReactNode; label: string; color: string }> = {
+    idle: { icon: null, label: "", color: "" },
+    uploading: {
+      icon: <Loader2 size={10} className="animate-spin" />,
+      label: `Uploading ${progress}%`,
+      color: "text-violet-400",
+    },
+    processing: {
+      icon: <Loader2 size={10} className="animate-spin" />,
+      label: "Processing…",
+      color: "text-yellow-400",
+    },
+    done: {
+      icon: <CheckCircle2 size={10} />,
+      label: "Ready",
+      color: "text-emerald-400",
+    },
+    error: {
+      icon: <AlertCircle size={10} />,
+      label: "Failed",
+      color: "text-red-400",
+    },
+  };
+
+  const { icon, label, color } = map[status];
+  return (
+    <div className={`flex items-center gap-1 text-[10px] font-medium ${color}`}>
+      {icon}
+      <span>{label}</span>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Top Bar
 // ---------------------------------------------------------------------------
 
-function TopBar() {
+function TopBar({ onExport, canExport }: { onExport: () => void; canExport: boolean }) {
   const logout = useEditorStore((s) => s.logout);
+  const mediaId = useEditorStore((s) => s.mediaId);
+
   return (
     <header
       className="flex items-center gap-3 px-4 shrink-0 border-b"
@@ -41,16 +85,24 @@ function TopBar() {
       <span className="text-[11px] font-semibold tracking-[0.25em] text-white uppercase">
         Rough Cut
       </span>
-
       <div className="w-px h-4 bg-zinc-700 mx-2" />
-
       <span className="text-[12px] text-zinc-400">Untitled Project</span>
+
+      {mediaId && (
+        <span className="text-[10px] text-zinc-600 font-mono ml-2">
+          media:{mediaId.slice(0, 8)}…
+        </span>
+      )}
 
       <div className="flex-1" />
 
-      <button className="flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-medium bg-violet-600 hover:bg-violet-500 text-white transition-colors">
+      <button
+        onClick={onExport}
+        disabled={!canExport}
+        className="flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-medium transition-colors disabled:opacity-30 disabled:cursor-not-allowed bg-violet-600 hover:bg-violet-500 text-white"
+      >
         <Download size={11} />
-        Export
+        Export FCP7-XML
       </button>
 
       <button
@@ -65,7 +117,7 @@ function TopBar() {
 }
 
 // ---------------------------------------------------------------------------
-// Media Bin (left panel)
+// Media Bin
 // ---------------------------------------------------------------------------
 
 interface MediaBinProps {
@@ -74,6 +126,9 @@ interface MediaBinProps {
 
 function MediaBin({ onFileSelect }: MediaBinProps) {
   const mediaFile = useEditorStore((s) => s.mediaFile);
+  const uploadStatus = useEditorStore((s) => s.uploadStatus);
+  const uploadProgress = useEditorStore((s) => s.uploadProgress);
+  const uploadError = useEditorStore((s) => s.uploadError);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -84,10 +139,9 @@ function MediaBin({ onFileSelect }: MediaBinProps) {
 
   return (
     <aside
-      className="flex flex-col h-full border-r shrink-0 overflow-hidden"
+      className="flex flex-col h-full border-r shrink-0"
       style={{ width: 220, background: "#1a1a1a", borderColor: "#2a2a2a" }}
     >
-      {/* Panel header */}
       <div
         className="flex items-center justify-between px-3 py-2 border-b shrink-0"
         style={{ borderColor: "#2a2a2a" }}
@@ -97,7 +151,8 @@ function MediaBin({ onFileSelect }: MediaBinProps) {
         </span>
         <button
           onClick={() => inputRef.current?.click()}
-          className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-violet-300 hover:text-white hover:bg-violet-600/30 transition-colors border border-violet-500/30"
+          disabled={uploadStatus === "uploading" || uploadStatus === "processing"}
+          className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium text-violet-300 hover:text-white hover:bg-violet-600/30 transition-colors border border-violet-500/30 disabled:opacity-40 disabled:cursor-not-allowed"
         >
           <Upload size={9} />
           Import
@@ -111,8 +166,7 @@ function MediaBin({ onFileSelect }: MediaBinProps) {
         />
       </div>
 
-      {/* Bin contents */}
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="flex-1 p-2 overflow-y-auto">
         {!mediaFile ? (
           <div
             className="flex flex-col items-center justify-center gap-2 h-full text-center cursor-pointer rounded-lg border border-dashed transition-colors hover:border-violet-500/40"
@@ -124,26 +178,42 @@ function MediaBin({ onFileSelect }: MediaBinProps) {
           </div>
         ) : (
           <div
-            className="flex items-start gap-2 p-2 rounded-md border cursor-default select-none"
+            className="flex flex-col gap-2 p-2 rounded-md border"
             style={{ background: "#222", borderColor: "#333" }}
           >
-            <div
-              className="flex items-center justify-center rounded shrink-0"
-              style={{ width: 36, height: 28, background: "#2d2d2d" }}
-            >
-              <Film size={14} className="text-violet-400" />
+            <div className="flex items-start gap-2">
+              <div
+                className="flex items-center justify-center rounded shrink-0"
+                style={{ width: 36, height: 28, background: "#2d2d2d" }}
+              >
+                <Film size={14} className="text-violet-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-[11px] text-zinc-200 truncate leading-tight" title={mediaFile.name}>
+                  {mediaFile.name}
+                </p>
+                <p className="text-[10px] text-zinc-600 mt-0.5">{formatSize(mediaFile.size)}</p>
+              </div>
             </div>
-            <div className="min-w-0">
-              <p className="text-[11px] text-zinc-200 truncate leading-tight" title={mediaFile.name}>
-                {mediaFile.name}
-              </p>
-              <p className="text-[10px] text-zinc-600 mt-0.5">{formatSize(mediaFile.size)}</p>
-            </div>
+
+            <UploadBadge status={uploadStatus} progress={uploadProgress} />
+
+            {uploadStatus === "uploading" && (
+              <div className="w-full h-0.5 rounded-full overflow-hidden" style={{ background: "#333" }}>
+                <div
+                  className="h-full bg-violet-500 transition-all duration-200 rounded-full"
+                  style={{ width: `${uploadProgress}%` }}
+                />
+              </div>
+            )}
+
+            {uploadStatus === "error" && uploadError && (
+              <p className="text-[10px] text-red-400 leading-tight">{uploadError}</p>
+            )}
           </div>
         )}
       </div>
 
-      {/* Bottom nav icons */}
       <div
         className="flex items-center justify-around px-2 py-2 border-t shrink-0"
         style={{ borderColor: "#2a2a2a" }}
@@ -168,7 +238,7 @@ function MediaBin({ onFileSelect }: MediaBinProps) {
 }
 
 // ---------------------------------------------------------------------------
-// Program Monitor (center)
+// Monitor
 // ---------------------------------------------------------------------------
 
 interface MonitorProps {
@@ -184,21 +254,15 @@ interface MonitorProps {
 function Monitor({ videoRef, videoUrl, currentTime, duration, onLoadedMetadata, onTimeUpdate, onEnded }: MonitorProps) {
   return (
     <div className="flex flex-col flex-1 h-full overflow-hidden" style={{ background: "#111" }}>
-      {/* Timecode strip */}
       <div
         className="flex items-center justify-between px-4 shrink-0 border-b"
         style={{ height: 28, borderColor: "#2a2a2a", background: "#161616" }}
       >
-        <span className="text-[10px] font-mono text-violet-300 tracking-widest">
-          {toTC(currentTime)}
-        </span>
+        <span className="text-[10px] font-mono text-violet-300 tracking-widest">{toTC(currentTime)}</span>
         <span className="text-[10px] text-zinc-600 uppercase tracking-wider">Program</span>
-        <span className="text-[10px] font-mono text-zinc-600 tracking-widest">
-          {toTC(duration)}
-        </span>
+        <span className="text-[10px] font-mono text-zinc-600 tracking-widest">{toTC(duration)}</span>
       </div>
 
-      {/* Video area */}
       <div className="flex-1 flex items-center justify-center bg-black overflow-hidden">
         {videoUrl ? (
           <video
@@ -222,18 +286,11 @@ function Monitor({ videoRef, videoUrl, currentTime, duration, onLoadedMetadata, 
         )}
       </div>
 
-      {/* Scrub bar */}
       {videoUrl && duration > 0 && (
         <div className="px-3 py-2 shrink-0" style={{ background: "#161616" }}>
           <input
-            type="range"
-            min={0}
-            max={duration}
-            step={0.01}
-            value={currentTime}
-            onChange={(e) => {
-              if (videoRef.current) videoRef.current.currentTime = Number(e.target.value);
-            }}
+            type="range" min={0} max={duration} step={0.01} value={currentTime}
+            onChange={(e) => { if (videoRef.current) videoRef.current.currentTime = Number(e.target.value); }}
             className="w-full h-1 accent-violet-500 cursor-pointer"
           />
         </div>
@@ -243,22 +300,21 @@ function Monitor({ videoRef, videoUrl, currentTime, duration, onLoadedMetadata, 
 }
 
 // ---------------------------------------------------------------------------
-// Inspector (right panel)
+// Inspector
 // ---------------------------------------------------------------------------
 
 function Inspector({ mediaFile, duration }: { mediaFile: File | null; duration: number }) {
+  const mediaId = useEditorStore((s) => s.mediaId);
+  const transcriptId = useEditorStore((s) => s.transcriptId);
+  const projectId = useEditorStore((s) => s.projectId);
+
   return (
     <aside
-      className="flex flex-col h-full border-l shrink-0 overflow-hidden"
+      className="flex flex-col h-full border-l shrink-0"
       style={{ width: 200, background: "#1a1a1a", borderColor: "#2a2a2a" }}
     >
-      <div
-        className="flex items-center px-3 py-2 border-b shrink-0"
-        style={{ borderColor: "#2a2a2a" }}
-      >
-        <span className="text-[10px] font-semibold tracking-widest text-zinc-500 uppercase">
-          Inspector
-        </span>
+      <div className="flex items-center px-3 py-2 border-b shrink-0" style={{ borderColor: "#2a2a2a" }}>
+        <span className="text-[10px] font-semibold tracking-widest text-zinc-500 uppercase">Inspector</span>
       </div>
 
       <div className="flex-1 overflow-y-auto p-3">
@@ -271,10 +327,13 @@ function Inspector({ mediaFile, duration }: { mediaFile: File | null; duration: 
               ["Size", formatSize(mediaFile.size)],
               ["Duration", duration > 0 ? `${duration.toFixed(2)}s` : "—"],
               ["Type", mediaFile.type || "video"],
+              ["Project ID", projectId ? projectId.slice(0, 12) + "…" : "—"],
+              ["Media ID", mediaId ? mediaId.slice(0, 12) + "…" : "—"],
+              ["Transcript ID", transcriptId ? transcriptId.slice(0, 12) + "…" : "—"],
             ].map(([label, value]) => (
               <div key={label}>
                 <p className="text-[9px] text-zinc-600 uppercase tracking-widest mb-0.5">{label}</p>
-                <p className="text-[11px] text-zinc-300 truncate" title={value}>{value}</p>
+                <p className="text-[11px] text-zinc-300 truncate font-mono" title={value}>{value}</p>
               </div>
             ))}
           </div>
@@ -285,7 +344,7 @@ function Inspector({ mediaFile, duration }: { mediaFile: File | null; duration: 
 }
 
 // ---------------------------------------------------------------------------
-// Transport Controls
+// Transport
 // ---------------------------------------------------------------------------
 
 interface TransportProps {
@@ -301,44 +360,43 @@ interface TransportProps {
   onVolumeChange: (v: number) => void;
 }
 
-function TransportBar({
-  isPlaying, currentTime, duration, volume,
-  onTogglePlay, onSkipBack, onSkipForward, onStepBack, onStepForward, onVolumeChange,
-}: TransportProps) {
+function TransportBar({ isPlaying, currentTime, duration, volume, onTogglePlay, onSkipBack, onSkipForward, onStepBack, onStepForward, onVolumeChange }: TransportProps) {
   return (
     <div
       className="flex items-center gap-4 px-4 shrink-0 border-t border-b"
       style={{ height: 44, background: "#161616", borderColor: "#2a2a2a" }}
     >
-      {/* Step / skip controls */}
       <div className="flex items-center gap-0.5">
-        <button onClick={onSkipBack} className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded" title="Go to start">
-          <SkipBack size={13} />
-        </button>
-        <button onClick={onStepBack} className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded" title="Step back">
-          <ChevronLeft size={13} />
-        </button>
+        {[
+          { action: onSkipBack, Icon: SkipBack, title: "Go to start" },
+          { action: onStepBack, Icon: ChevronLeft, title: "Step back 1 frame" },
+        ].map(({ action, Icon, title }) => (
+          <button key={title} onClick={action} title={title}
+            className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded">
+            <Icon size={13} />
+          </button>
+        ))}
+
         <button
           onClick={onTogglePlay}
           className="mx-1 flex items-center justify-center rounded-full bg-violet-600 hover:bg-violet-500 active:bg-violet-700 transition-colors text-white"
           style={{ width: 28, height: 28 }}
-          title={isPlaying ? "Pause" : "Play"}
         >
           {isPlaying ? <Pause size={12} fill="white" /> : <Play size={12} fill="white" />}
         </button>
-        <button onClick={onStepForward} className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded" title="Step forward">
-          <ChevronRight size={13} />
-        </button>
-        <button onClick={onSkipForward} className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded" title="Go to end">
-          <SkipForward size={13} />
-        </button>
+
+        {[
+          { action: onStepForward, Icon: ChevronRight, title: "Step forward 1 frame" },
+          { action: onSkipForward, Icon: SkipForward, title: "Go to end" },
+        ].map(({ action, Icon, title }) => (
+          <button key={title} onClick={action} title={title}
+            className="p-1.5 text-zinc-500 hover:text-white transition-colors rounded">
+            <Icon size={13} />
+          </button>
+        ))}
       </div>
 
-      {/* Timecode */}
-      <div
-        className="flex items-center gap-1 px-2 py-1 rounded font-mono"
-        style={{ background: "#0d0d0d", border: "1px solid #2a2a2a" }}
-      >
+      <div className="flex items-center gap-1 px-2 py-1 rounded font-mono" style={{ background: "#0d0d0d", border: "1px solid #2a2a2a" }}>
         <span className="text-[12px] text-violet-300 tracking-widest">{toTC(currentTime)}</span>
         <span className="text-[10px] text-zinc-700 mx-1">/</span>
         <span className="text-[11px] text-zinc-600 tracking-widest">{toTC(duration)}</span>
@@ -346,18 +404,11 @@ function TransportBar({
 
       <div className="flex-1" />
 
-      {/* Volume */}
       <div className="flex items-center gap-2">
         <Volume2 size={12} className="text-zinc-600" />
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={volume}
+        <input type="range" min={0} max={1} step={0.01} value={volume}
           onChange={(e) => onVolumeChange(Number(e.target.value))}
-          className="w-20 h-1 accent-violet-500 cursor-pointer"
-        />
+          className="w-20 h-1 accent-violet-500 cursor-pointer" />
       </div>
     </div>
   );
@@ -374,108 +425,57 @@ function Timeline({ mediaFile, currentTime, duration }: { mediaFile: File | null
   const ticks = Array.from({ length: tickCount }, (_, i) => i);
 
   return (
-    <div
-      className="flex flex-col shrink-0 border-t overflow-hidden"
-      style={{ height: 200, background: "#141414", borderColor: "#2a2a2a" }}
-    >
-      {/* Timeline header row */}
-      <div
-        className="flex items-center border-b shrink-0"
-        style={{ height: 24, borderColor: "#2a2a2a" }}
-      >
-        <div
-          className="flex items-center px-3 shrink-0 border-r"
-          style={{ width: HEADER_W, borderColor: "#2a2a2a" }}
-        >
+    <div className="flex flex-col shrink-0 border-t overflow-hidden" style={{ height: 200, background: "#141414", borderColor: "#2a2a2a" }}>
+      <div className="flex items-center border-b shrink-0" style={{ height: 24, borderColor: "#2a2a2a" }}>
+        <div className="flex items-center px-3 shrink-0 border-r" style={{ width: HEADER_W, borderColor: "#2a2a2a" }}>
           <span className="text-[9px] font-semibold tracking-widest text-zinc-600 uppercase">Tracks</span>
         </div>
-        {/* Ruler */}
         <div className="flex-1 overflow-hidden relative" style={{ height: 24 }}>
-          <div className="flex items-end h-full" style={{ minWidth: "100%" }}>
+          <div className="flex items-end h-full">
             {ticks.map((i) => (
-              <div
-                key={i}
-                className="flex flex-col items-start justify-end shrink-0"
-                style={{ width: 60, height: "100%", borderLeft: "1px solid #2a2a2a" }}
-              >
+              <div key={i} className="flex flex-col items-start justify-end shrink-0"
+                style={{ width: 60, height: "100%", borderLeft: "1px solid #2a2a2a" }}>
                 <span className="text-[9px] text-zinc-700 pl-1 pb-1 font-mono">
                   {`${String(Math.floor(i / 60)).padStart(2, "0")}:${String(i % 60).padStart(2, "0")}`}
                 </span>
               </div>
             ))}
           </div>
-          {/* Playhead */}
           {duration > 0 && (
-            <div
-              className="absolute top-0 bottom-0 w-px bg-violet-400 pointer-events-none"
-              style={{ left: `${(currentTime / duration) * 100}%` }}
-            />
+            <div className="absolute top-0 bottom-0 w-px bg-violet-400 pointer-events-none"
+              style={{ left: `${(currentTime / duration) * 100}%` }} />
           )}
         </div>
       </div>
 
-      {/* Track lanes */}
       <div className="flex-1 overflow-y-auto overflow-x-hidden">
         {tracks.map((track) => (
-          <div
-            key={track}
-            className="flex border-b"
-            style={{ height: 40, borderColor: "#1f1f1f" }}
-          >
-            {/* Track header */}
-            <div
-              className="flex items-center px-3 shrink-0 border-r"
-              style={{ width: HEADER_W, background: "#1a1a1a", borderColor: "#2a2a2a" }}
-            >
+          <div key={track} className="flex border-b" style={{ height: 40, borderColor: "#1f1f1f" }}>
+            <div className="flex items-center px-3 shrink-0 border-r"
+              style={{ width: HEADER_W, background: "#1a1a1a", borderColor: "#2a2a2a" }}>
               <span className="text-[10px] font-mono text-zinc-600">{track}</span>
             </div>
-            {/* Track lane */}
             <div className="flex-1 relative overflow-hidden" style={{ background: "#141414" }}>
-              {/* Grid lines */}
               <div className="absolute inset-0 flex pointer-events-none">
                 {ticks.map((i) => (
                   <div key={i} className="shrink-0" style={{ width: 60, borderLeft: "1px solid #1e1e1e" }} />
                 ))}
               </div>
-
-              {/* Clip block on V1 */}
               {mediaFile && track === "V1" && duration > 0 && (
-                <div
-                  className="absolute top-1 bottom-1 rounded flex items-center px-2 overflow-hidden"
-                  style={{
-                    left: 2,
-                    width: `calc(${(duration / tickCount) * 100}% - 4px)`,
-                    background: "rgba(109,40,217,0.35)",
-                    border: "1px solid rgba(139,92,246,0.5)",
-                  }}
-                >
-                  <span className="text-[10px] text-violet-300 truncate font-medium">
-                    {mediaFile.name}
-                  </span>
+                <div className="absolute top-1 bottom-1 rounded flex items-center px-2 overflow-hidden"
+                  style={{ left: 2, width: `calc(${(duration / tickCount) * 100}% - 4px)`, background: "rgba(109,40,217,0.35)", border: "1px solid rgba(139,92,246,0.5)" }}>
+                  <span className="text-[10px] text-violet-300 truncate font-medium">{mediaFile.name}</span>
                 </div>
               )}
-
-              {/* Audio clip on A1 */}
               {mediaFile && track === "A1" && duration > 0 && (
-                <div
-                  className="absolute top-1 bottom-1 rounded flex items-center px-2 overflow-hidden"
-                  style={{
-                    left: 2,
-                    width: `calc(${(duration / tickCount) * 100}% - 4px)`,
-                    background: "rgba(30,80,60,0.5)",
-                    border: "1px solid rgba(52,211,153,0.25)",
-                  }}
-                >
+                <div className="absolute top-1 bottom-1 rounded flex items-center px-2 overflow-hidden"
+                  style={{ left: 2, width: `calc(${(duration / tickCount) * 100}% - 4px)`, background: "rgba(30,80,60,0.5)", border: "1px solid rgba(52,211,153,0.25)" }}>
                   <span className="text-[10px] text-emerald-500/70 truncate">audio</span>
                 </div>
               )}
-
-              {/* Playhead line */}
               {duration > 0 && (
-                <div
-                  className="absolute top-0 bottom-0 w-px bg-violet-400/60 pointer-events-none"
-                  style={{ left: `${(currentTime / duration) * 100}%` }}
-                />
+                <div className="absolute top-0 bottom-0 w-px bg-violet-400/60 pointer-events-none"
+                  style={{ left: `${(currentTime / duration) * 100}%` }} />
               )}
             </div>
           </div>
@@ -486,17 +486,15 @@ function Timeline({ mediaFile, currentTime, duration }: { mediaFile: File | null
 }
 
 // ---------------------------------------------------------------------------
-// Drop Overlay
+// Drop overlay
 // ---------------------------------------------------------------------------
 
 function DropOverlay({ isDragActive }: { isDragActive: boolean }) {
   if (!isDragActive) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(4px)" }}>
-      <div
-        className="flex flex-col items-center justify-center gap-4 rounded-2xl"
-        style={{ width: 360, height: 220, border: "2px dashed #7c3aed" }}
-      >
+      <div className="flex flex-col items-center justify-center gap-4 rounded-2xl"
+        style={{ width: 360, height: 220, border: "2px dashed #7c3aed" }}>
         <Upload size={32} className="text-violet-400" />
         <p className="text-white text-base font-medium tracking-wide">Drop your video file</p>
         <p className="text-zinc-500 text-xs">MP4 · MOV · MXF · AVI · MKV</p>
@@ -506,12 +504,12 @@ function DropOverlay({ isDragActive }: { isDragActive: boolean }) {
 }
 
 // ---------------------------------------------------------------------------
-// Root Editor
+// Root — upload pipeline
 // ---------------------------------------------------------------------------
 
 export default function MainEditor() {
-  const mediaFile = useEditorStore((s) => s.mediaFile);
-  const setMediaFile = useEditorStore((s) => s.setMediaFile);
+  const store = useEditorStore();
+  const { mediaFile, secretKey, userId, projectId, uploadStatus } = store;
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -520,7 +518,6 @@ export default function MainEditor() {
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
 
-  // Create / revoke object URL whenever mediaFile changes
   useEffect(() => {
     if (!mediaFile) { setVideoUrl(null); setDuration(0); setCurrentTime(0); return; }
     const url = URL.createObjectURL(mediaFile);
@@ -528,10 +525,74 @@ export default function MainEditor() {
     return () => URL.revokeObjectURL(url);
   }, [mediaFile]);
 
-  // Sync volume to video element
   useEffect(() => {
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume]);
+
+  // ── Full upload pipeline ─────────────────────────────────────────────────
+
+  const runUploadPipeline = useCallback(async (file: File) => {
+    store.setMediaFile(file);
+    store.setUploadStatus("uploading");
+    store.setUploadProgress(0);
+
+    try {
+      // 1. Bootstrap user (idempotent — reuses existing row)
+      let uid = userId;
+      if (!uid) {
+        uid = await bootstrapUser(secretKey ?? "roughcut2025");
+        store.setBackendIds({ userId: uid });
+      }
+
+      // 2. Create project (once per session)
+      let pid = projectId;
+      if (!pid) {
+        pid = await createProject(uid, "Rough Cut Session");
+        store.setBackendIds({ projectId: pid });
+      }
+
+      // 3. Upload media + mock transcription
+      store.setUploadProgress(10);
+      const { mediaId, transcriptId } = await uploadMedia(
+        file,
+        pid,
+        (pct) => store.setUploadProgress(10 + Math.round(pct * 0.85))
+      );
+
+      store.setBackendIds({ mediaId, transcriptId });
+      store.setUploadStatus("done");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Upload failed";
+      store.setUploadStatus("error", msg);
+    }
+  }, [userId, projectId, secretKey, store]);
+
+  // ── Export ───────────────────────────────────────────────────────────────
+
+  const handleExport = useCallback(async () => {
+    const { mediaId } = useEditorStore.getState();
+    if (!mediaId) return;
+    try {
+      const xml = await generateExport(mediaId, 0.5, 5);
+      const stem = mediaFile?.name.replace(/\.[^.]+$/, "") ?? "export";
+      downloadFile(xml, `${stem}.xml`, "application/xml");
+    } catch (err) {
+      console.error("Export failed:", err);
+    }
+  }, [mediaFile]);
+
+  // ── Dropzone ─────────────────────────────────────────────────────────────
+
+  const onDrop = useCallback((accepted: File[], _: FileRejection[]) => {
+    if (accepted[0]) runUploadPipeline(accepted[0]);
+  }, [runUploadPipeline]);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: { "video/*": [".mp4", ".mov", ".mxf", ".avi", ".mkv"] },
+    noClick: true,
+    multiple: false,
+  });
 
   const togglePlay = () => {
     const v = videoRef.current;
@@ -540,17 +601,7 @@ export default function MainEditor() {
     else { v.pause(); setIsPlaying(false); }
   };
 
-  // Global drag-and-drop
-  const onDrop = useCallback((accepted: File[], _: FileRejection[]) => {
-    if (accepted[0]) setMediaFile(accepted[0]);
-  }, [setMediaFile]);
-
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
-    onDrop,
-    accept: { "video/*": [".mp4", ".mov", ".mxf", ".avi", ".mkv"] },
-    noClick: true,
-    multiple: false,
-  });
+  const canExport = !!store.mediaId && uploadStatus === "done";
 
   return (
     <div
@@ -561,11 +612,10 @@ export default function MainEditor() {
       <input {...getInputProps()} />
       <DropOverlay isDragActive={isDragActive} />
 
-      <TopBar />
+      <TopBar onExport={handleExport} canExport={canExport} />
 
-      {/* Main content: Media Bin | Monitor | Inspector */}
       <div className="flex flex-1 overflow-hidden min-h-0">
-        <MediaBin onFileSelect={setMediaFile} />
+        <MediaBin onFileSelect={(f) => runUploadPipeline(f)} />
         <Monitor
           videoRef={videoRef}
           videoUrl={videoUrl}
@@ -585,9 +635,9 @@ export default function MainEditor() {
         volume={volume}
         onTogglePlay={togglePlay}
         onSkipBack={() => { if (videoRef.current) { videoRef.current.currentTime = 0; setCurrentTime(0); } }}
-        onSkipForward={() => { if (videoRef.current && duration) { videoRef.current.currentTime = duration; setCurrentTime(duration); } }}
-        onStepBack={() => { if (videoRef.current) { videoRef.current.currentTime = Math.max(0, currentTime - 1 / 24); } }}
-        onStepForward={() => { if (videoRef.current) { videoRef.current.currentTime = Math.min(duration, currentTime + 1 / 24); } }}
+        onSkipForward={() => { if (videoRef.current) { videoRef.current.currentTime = duration; setCurrentTime(duration); } }}
+        onStepBack={() => { if (videoRef.current) videoRef.current.currentTime = Math.max(0, currentTime - 1 / 24); }}
+        onStepForward={() => { if (videoRef.current) videoRef.current.currentTime = Math.min(duration, currentTime + 1 / 24); }}
         onVolumeChange={setVolume}
       />
 

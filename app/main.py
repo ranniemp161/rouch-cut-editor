@@ -1,17 +1,16 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sqlmodel import SQLModel
+from fastapi.middleware.cors import CORSMiddleware
 
 import app.models  # noqa: F401 — registers all SQLModel table metadata before create_all
-from app.api import exports, media, media_assets, projects, transcripts
+from app.api import auth, exports, media, media_assets, projects, transcripts
 from app.core.config import settings
 from app.db.session import engine
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # Schema is managed by Alembic migrations — do not call create_all here.
     yield
 
 
@@ -21,6 +20,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Allow the Next.js dev server (and any localhost port) to call the API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router, prefix=settings.API_V1_PREFIX)
 app.include_router(projects.router, prefix=settings.API_V1_PREFIX)
 app.include_router(media.router, prefix=settings.API_V1_PREFIX)
 app.include_router(media_assets.router, prefix=settings.API_V1_PREFIX)

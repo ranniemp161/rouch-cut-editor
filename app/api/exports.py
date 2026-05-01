@@ -5,6 +5,7 @@ from sqlmodel import select
 
 from app.api.deps import SessionDep
 from app.models.export import Export
+from app.models.media_asset import MediaAsset
 from app.models.transcript import Transcript
 from app.schemas.export import ExportRequest
 from app.services import export_service
@@ -17,7 +18,7 @@ def generate_export(request: ExportRequest, session: SessionDep) -> Response:
     """
     Generate an FCP7-XML export for a given media asset.
 
-    Fetches the most recent Transcript for the supplied media_id, applies
+    Fetches the most recent Transcript and its parent MediaAsset, applies
     silence detection and handle padding via the export service, and returns
     the raw XML payload directly so NLEs can consume it without unwrapping JSON.
     """
@@ -30,11 +31,20 @@ def generate_export(request: ExportRequest, session: SessionDep) -> Response:
     if not transcript:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No transcript found for media_id={request.media_id}. "
-                   "Upload the media file first via POST /media/upload.",
+            detail=(
+                f"No transcript found for media_id={request.media_id}. "
+                "Upload the media file first via POST /media/upload."
+            ),
         )
 
-    xml_string = export_service.generate_xml(transcript, request)
+    asset = session.get(MediaAsset, request.media_id)
+    if not asset:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Media asset {request.media_id} not found.",
+        )
+
+    xml_string = export_service.generate_xml(transcript, request, asset)
 
     return Response(content=xml_string, media_type="application/xml")
 

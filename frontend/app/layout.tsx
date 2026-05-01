@@ -27,7 +27,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased dark`}
     >
-      <body className="h-full overflow-hidden bg-zinc-950">{children}</body>
+      <body className="h-full overflow-hidden bg-zinc-950" suppressHydrationWarning>{children}</body>
     </html>
   );
 }

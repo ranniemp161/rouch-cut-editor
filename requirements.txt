@@ -6,3 +6,4 @@ psycopg2-binary
 python-multipart
 pydantic-settings
 ffmpeg-python
+faster-whisper
