@@ -12,15 +12,19 @@ from app.services import export_service
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 
+_MIME = {
+    "FCP7-XML": "application/xml",
+    "CMX3600-EDL": "text/plain",
+}
+
 
 @router.post("/generate", status_code=status.HTTP_200_OK)
 def generate_export(request: ExportRequest, session: SessionDep) -> Response:
     """
-    Generate an FCP7-XML export for a given media asset.
+    Generate an FCP7-XML or CMX3600-EDL export for a given media asset.
 
-    Fetches the most recent Transcript and its parent MediaAsset, applies
-    silence detection and handle padding via the export service, and returns
-    the raw XML payload directly so NLEs can consume it without unwrapping JSON.
+    Returns the raw payload so NLEs can consume it directly without unwrapping JSON.
+    Default format is CMX3600-EDL (pass format="FCP7-XML" for Final Cut Pro).
     """
     transcript = session.exec(
         select(Transcript)
@@ -44,9 +48,9 @@ def generate_export(request: ExportRequest, session: SessionDep) -> Response:
             detail=f"Media asset {request.media_id} not found.",
         )
 
-    xml_string = export_service.generate_xml(transcript, request, asset)
+    content, media_type = export_service.generate(transcript, request, asset)
 
-    return Response(content=xml_string, media_type="application/xml")
+    return Response(content=content, media_type=media_type)
 
 
 @router.get("/{export_id}", tags=["exports"])

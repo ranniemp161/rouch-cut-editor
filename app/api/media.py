@@ -1,12 +1,13 @@
 import uuid
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile, status
 from sqlmodel import select
 
 from app.api.deps import SessionDep
 from app.models.media_asset import MediaAsset
 from app.models.transcript import Transcript
-from app.services import media_service
+from app.schemas.analysis import AnalysisResult, AnalysisSegment, WordItem
+from app.services import analysis_service, media_service
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -82,3 +83,58 @@ def get_media_asset(asset_id: uuid.UUID, session: SessionDep) -> dict:
         "transcript_id": str(transcript.id) if transcript else None,
         "created_at": asset.created_at.isoformat(),
     }
+
+
+@router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_media_asset(asset_id: uuid.UUID, session: SessionDep) -> None:
+    """
+    Delete a media asset and its dependent rows (transcripts, exports) via
+    SQLAlchemy cascade. Frees the Neon storage used by this clip's transcript.
+    """
+    asset = session.get(MediaAsset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found")
+    session.delete(asset)
+    session.commit()
+
+
+@router.get("/{asset_id}/analysis", response_model=AnalysisResult)
+def get_analysis(
+    asset_id: uuid.UUID,
+    session: SessionDep,
+    silence_threshold: float = Query(default=0.5, gt=0, description="Minimum silence gap in seconds to treat as a cut point"),
+) -> AnalysisResult:
+    """
+    Compute and return cut/keep segments for a media asset.
+
+    Pure compute — no re-processing. Reads the stored word-level transcript,
+    detects silence gaps and consecutive repetitions, and returns time-ordered
+    segments the client can render as a toggleable transcript view.
+
+    Change silence_threshold to re-analyse without re-uploading.
+    """
+    asset = session.get(MediaAsset, asset_id)
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found")
+
+    transcript = session.exec(
+        select(Transcript)
+        .where(Transcript.media_asset_id == asset_id)
+        .order_by(Transcript.created_at.desc())  # type: ignore[arg-type]
+    ).first()
+
+    if not transcript:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found — upload the media first")
+
+    words: list[dict] = transcript.word_level_data or []
+
+    raw_segments = analysis_service.analyze_transcript(words, asset.duration_seconds, silence_threshold)
+
+    return AnalysisResult(
+        words=[WordItem(**w) for w in words],
+        segments=[AnalysisSegment(**s) for s in raw_segments],
+        duration_seconds=asset.duration_seconds,
+        frame_rate=asset.frame_rate,
+        total_frames=asset.total_frames,
+        silence_threshold=silence_threshold,
+    )

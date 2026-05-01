@@ -27,5 +27,6 @@ class ExportRead(BaseModel):
 class ExportRequest(BaseModel):
     """Request body for the POST /exports/generate endpoint."""
     media_id: uuid.UUID
+    format: ExportFormat = "CMX3600-EDL"
     silence_threshold: float = Field(default=0.5, gt=0, description="Minimum gap in seconds to treat as a cut point")
     handle_padding_frames: int = Field(default=5, ge=0, description="Frames of safety added on each side of a cut")

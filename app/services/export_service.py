@@ -2,20 +2,20 @@
 Export generation service.
 
 Consumes word-level transcript data and an ExportRequest to produce a
-standards-compliant FCP7-XML string that any NLE can import.
+standards-compliant FCP7-XML or CMX3600-EDL string that any NLE can import.
 
 Algorithm:
     1. Identify silence gaps between consecutive words using silence_threshold.
     2. Invert the gaps into keep-segments (the speech regions between gaps).
     3. Convert each segment's start/end seconds to frame numbers.
     4. Expand each segment by handle_padding_frames, clamped to clip bounds.
-    5. Render segments as <clipitem> blocks inside an FCP7 <xmeml> envelope.
+    5. Render segments as <clipitem> blocks (XML) or event lines (EDL).
 """
 
 from typing import TYPE_CHECKING
 
 from app.services.transcription import find_silence_gaps
-from app.utils.timecode import add_handles, seconds_to_frame
+from app.utils.timecode import add_handles, frames_to_smpte, seconds_to_frame
 
 if TYPE_CHECKING:
     from app.models.media_asset import MediaAsset
@@ -23,28 +23,30 @@ if TYPE_CHECKING:
     from app.schemas.export import ExportRequest
 
 
-def generate_xml(
+def generate(
     transcript: "Transcript",
     request: "ExportRequest",
     asset: "MediaAsset",
-) -> str:
+) -> tuple[str, str]:
     """
-    Build and return an FCP7-XML payload for the given transcript + asset.
+    Build and return (content, media_type) for the requested export format.
     """
     word_data: list[dict] = transcript.word_level_data or []
-    frame_rate = asset.frame_rate
-    total_frames = asset.total_frames
+    segments = _build_segments(word_data, request, asset.frame_rate, asset.total_frames)
 
-    segments = _build_segments(word_data, request, frame_rate, total_frames)
+    if request.format == "CMX3600-EDL":
+        content = _render_edl(asset, segments)
+        return content, "text/plain"
 
-    return _render_fcp7_xml(
+    content = _render_fcp7_xml(
         transcript_id=str(transcript.id),
         filename=asset.original_filename,
-        frame_rate=frame_rate,
+        frame_rate=asset.frame_rate,
         segments=segments,
         request=request,
         word_count=len(word_data),
     )
+    return content, "application/xml"
 
 
 # ---------------------------------------------------------------------------
@@ -59,18 +61,13 @@ def _build_segments(
 ) -> list[tuple[int, int]]:
     """
     Convert word timestamps into a list of (in_frame, out_frame) keep-segments.
-
-    Each contiguous run of words not separated by a silence gap becomes one
-    segment. Handles are added on both sides after conversion to frames.
     """
     if not word_data:
-        # No transcript — export the entire clip as a single segment.
         return [(0, total_frames - 1)]
 
     gaps = find_silence_gaps(word_data, request.silence_threshold)
     gap_set: set[tuple[float, float]] = set(gaps)
 
-    # Build contiguous word runs separated by silence gaps.
     runs: list[tuple[float, float]] = []
     seg_start = word_data[0]["start"]
 
@@ -82,7 +79,6 @@ def _build_segments(
 
     runs.append((seg_start, word_data[-1]["end"]))
 
-    # Convert seconds → frames and apply handle padding.
     segments: list[tuple[int, int]] = []
     for start_s, end_s in runs:
         in_f = seconds_to_frame(start_s, frame_rate)
@@ -101,14 +97,7 @@ def _render_fcp7_xml(
     request: "ExportRequest",
     word_count: int,
 ) -> str:
-    """
-    Render a list of (in_frame, out_frame) segments as an FCP7-XML string.
-
-    Timeline positions (<start>/<end>) accumulate across clipitems so the
-    sequence plays back as a continuous edit without gaps.
-    """
     timebase = round(frame_rate)
-
     clip_items: list[str] = []
     record_cursor = 0
 
@@ -152,3 +141,29 @@ def _render_fcp7_xml(
         "  </sequence>\n"
         "</xmeml>"
     )
+
+
+def _render_edl(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:
+    """
+    CMX 3600 EDL.
+    Each line: {event:03d}  AX  V  C  {src_in} {src_out} {rec_in} {rec_out}
+    """
+    fps = asset.frame_rate
+    stem = asset.original_filename.rsplit(".", 1)[0]
+
+    lines = [f"TITLE: {stem}", "FCM: NON-DROP FRAME", ""]
+
+    rec_cursor = 0
+    for i, (in_f, out_f) in enumerate(segments, start=1):
+        duration = out_f - in_f
+        rec_in = rec_cursor
+        rec_out = rec_cursor + duration
+        rec_cursor = rec_out
+
+        lines.append(
+            f"{i:03d}  AX  V  C  "
+            f"{frames_to_smpte(in_f, fps)} {frames_to_smpte(out_f, fps)} "
+            f"{frames_to_smpte(rec_in, fps)} {frames_to_smpte(rec_out, fps)}"
+        )
+
+    return "\n".join(lines)

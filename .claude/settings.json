@@ -18,7 +18,12 @@
       "Bash(ffmpeg -f lavfi -i color=black:size=320x240:rate=24 -f lavfi -i sine=frequency=440:duration=3 -t 3 -c:v libx264 -c:a aac /tmp/smoke_test.mp4 -y)",
       "Read(//tmp/**)",
       "Bash(curl --version)",
-      "Bash(curl -s -X POST http://localhost:8000/api/v1/exports/generate -H 'Content-Type: application/json' -d '{\"media_id\":\"407ce879-c31d-4413-8b29-a2555354727e\",\"silence_threshold\":0.5,\"handle_padding_frames\":5}')"
+      "Bash(curl -s -X POST http://localhost:8000/api/v1/exports/generate -H 'Content-Type: application/json' -d '{\"media_id\":\"407ce879-c31d-4413-8b29-a2555354727e\",\"silence_threshold\":0.5,\"handle_padding_frames\":5}')",
+      "Bash(curl -s \"http://localhost:8000/api/v1/media/407ce879-c31d-4413-8b29-a2555354727e/analysis?silence_threshold=0.5\")",
+      "Bash(python -c ' *)",
+      "Bash(npx tsc *)",
+      "Bash(curl -s \"http://localhost:8000/api/v1/media/883f64af-4277-4512-b6d6-33c30c527273/analysis?silence_threshold=0.5\" -o /tmp/analysis.json)",
+      "Bash(curl -s -X DELETE -w \"\\\\nHTTP %{http_code}\\\\n\" http://localhost:8000/api/v1/media/883f64af-4277-4512-b6d6-33c30c527273)"
     ]
   }
 }

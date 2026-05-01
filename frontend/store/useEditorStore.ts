@@ -1,25 +1,23 @@
 import { create } from "zustand";
+import type { WordItem, AnalysisSegment } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type UploadStatus = "idle" | "uploading" | "processing" | "done" | "error";
+export type PipelineStage =
+  | "idle"
+  | "file_selected"
+  | "uploading"
+  | "transcribing"
+  | "ready"
+  | "error";
 
-interface Clip {
-  id: string;
-  filename: string;
-  startFrame: number;
-  endFrame: number;
-  trackIndex: number;
-}
-
-interface TimelineState {
-  clips: Clip[];
-  currentFrame: number;
-  durationFrames: number;
-  fps: number;
-  zoom: number;
+export interface TranscriptSegment {
+  startS: number;
+  endS: number;
+  reason: "silence" | "repetition" | "keep";
+  isCut: boolean;
 }
 
 interface EditorStore {
@@ -27,30 +25,39 @@ interface EditorStore {
   isAuthenticated: boolean;
   secretKey: string | null;
 
-  // ── Backend IDs (set after API calls succeed) ─────────────────────────────
+  // ── Backend IDs ───────────────────────────────────────────────────────────
   userId: string | null;
   projectId: string | null;
   mediaId: string | null;
   transcriptId: string | null;
 
-  // ── Media (local File reference for the video player) ─────────────────────
+  // ── File (local reference — never written to disk) ────────────────────────
   mediaFile: File | null;
 
-  // ── Upload pipeline state ─────────────────────────────────────────────────
-  uploadStatus: UploadStatus;
-  uploadProgress: number;   // 0-100
-  uploadError: string | null;
+  // ── Pipeline ──────────────────────────────────────────────────────────────
+  pipelineStage: PipelineStage;
+  uploadProgress: number;
+  pipelineError: string | null;
 
-  // ── Timeline (mock) ───────────────────────────────────────────────────────
-  timelineState: TimelineState;
+  // ── Analysis results ──────────────────────────────────────────────────────
+  analysisWords: WordItem[];
+  segments: TranscriptSegment[];   // source of truth; user can toggle isCut
+  silenceThreshold: number;
+  frameRate: number;
+  totalFrames: number;
+  durationSeconds: number;
 
   // ── Actions ───────────────────────────────────────────────────────────────
   login: (secret: string) => void;
   logout: () => void;
-  setMediaFile: (file: File) => void;
-  setBackendIds: (ids: Partial<Pick<EditorStore, "userId" | "projectId" | "mediaId" | "transcriptId">>) => void;
-  setUploadStatus: (status: UploadStatus, error?: string) => void;
+  selectFile: (file: File) => void;
+  setPipelineStage: (stage: PipelineStage, error?: string) => void;
   setUploadProgress: (pct: number) => void;
+  setBackendIds: (ids: Partial<Pick<EditorStore, "userId" | "projectId" | "mediaId" | "transcriptId">>) => void;
+  setAnalysis: (words: WordItem[], segments: AnalysisSegment[], meta: { frameRate: number; totalFrames: number; durationSeconds: number }) => void;
+  toggleSegment: (startS: number) => void;
+  setSilenceThreshold: (t: number) => void;
+  clearMedia: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -59,14 +66,6 @@ interface EditorStore {
 
 const LS_KEY = "EDITOR_AUTH";
 export const VALID_SECRET = process.env.NEXT_PUBLIC_EDITOR_SECRET ?? "roughcut2025";
-
-const defaultTimeline: TimelineState = {
-  clips: [],
-  currentFrame: 0,
-  durationFrames: 0,
-  fps: 23.976,
-  zoom: 1,
-};
 
 // ---------------------------------------------------------------------------
 // Store
@@ -83,13 +82,18 @@ export const useEditorStore = create<EditorStore>((set) => ({
 
   mediaFile: null,
 
-  uploadStatus: "idle",
+  pipelineStage: "idle",
   uploadProgress: 0,
-  uploadError: null,
+  pipelineError: null,
 
-  timelineState: defaultTimeline,
+  analysisWords: [],
+  segments: [],
+  silenceThreshold: 0.5,
+  frameRate: 23.976,
+  totalFrames: 0,
+  durationSeconds: 0,
 
-  login: (secret: string) => {
+  login: (secret) => {
     if (secret !== VALID_SECRET) return;
     localStorage.setItem(LS_KEY, "true");
     set({ isAuthenticated: true, secretKey: secret });
@@ -105,20 +109,63 @@ export const useEditorStore = create<EditorStore>((set) => ({
       projectId: null,
       mediaId: null,
       transcriptId: null,
-      uploadStatus: "idle",
+      pipelineStage: "idle",
       uploadProgress: 0,
-      uploadError: null,
+      pipelineError: null,
+      analysisWords: [],
+      segments: [],
     });
   },
 
-  setMediaFile: (file: File) => set({ mediaFile: file }),
+  selectFile: (file) =>
+    set({ mediaFile: file, pipelineStage: "file_selected", pipelineError: null }),
+
+  setPipelineStage: (stage, error?) =>
+    set({ pipelineStage: stage, pipelineError: error ?? null }),
+
+  setUploadProgress: (pct) => set({ uploadProgress: pct }),
 
   setBackendIds: (ids) => set((s) => ({ ...s, ...ids })),
 
-  setUploadStatus: (status, error = null) =>
-    set({ uploadStatus: status, uploadError: error }),
+  setAnalysis: (words, rawSegments, meta) => {
+    const segments: TranscriptSegment[] = rawSegments.map((s) => ({
+      startS: s.start_s,
+      endS: s.end_s,
+      reason: s.reason as TranscriptSegment["reason"],
+      isCut: s.is_cut,
+    }));
+    set({
+      analysisWords: words,
+      segments,
+      frameRate: meta.frameRate,
+      totalFrames: meta.totalFrames,
+      durationSeconds: meta.durationSeconds,
+      pipelineStage: "ready",
+    });
+  },
 
-  setUploadProgress: (pct) => set({ uploadProgress: pct }),
+  toggleSegment: (startS) =>
+    set((s) => ({
+      segments: s.segments.map((seg) =>
+        seg.startS === startS ? { ...seg, isCut: !seg.isCut } : seg
+      ),
+    })),
+
+  setSilenceThreshold: (t) => set({ silenceThreshold: t }),
+
+  clearMedia: () =>
+    set({
+      mediaFile: null,
+      mediaId: null,
+      transcriptId: null,
+      pipelineStage: "idle",
+      uploadProgress: 0,
+      pipelineError: null,
+      analysisWords: [],
+      segments: [],
+      totalFrames: 0,
+      durationSeconds: 0,
+    }),
 }));
 
 export const rehydrateAuth = () => {
