@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { TranscriptSegment } from "@/store/useEditorStore";
+import { useEditorStore, type TranscriptSegment } from "@/store/useEditorStore";
 
 /**
  * Encapsulates HTMLVideoElement state and provides cut-aware playback.
@@ -14,6 +14,9 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(1);
+
+  const seekTime = useEditorStore((s) => s.seekTime);
+  const setSeekTime = useEditorStore((s) => s.setSeekTime);
 
   // Object URL lifecycle — created on file change, revoked on cleanup.
   useEffect(() => {
@@ -70,6 +73,19 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     videoRef.current.currentTime = t;
     setCurrentTime(t);
   }, []);
+
+  // Drive playback from the store's seekTime: any caller that does
+  // setSeekTime(t) — the transcript, the timeline scrubber, etc. — moves
+  // the video here. We consume it back to null so the same time can be
+  // re-issued (e.g. clicking the same word twice still seeks).
+  useEffect(() => {
+    if (seekTime === null) return;
+    if (videoRef.current) {
+      videoRef.current.currentTime = seekTime;
+      setCurrentTime(seekTime);
+    }
+    setSeekTime(null);
+  }, [seekTime, setSeekTime]);
 
   const skipBack = useCallback(() => seekTo(0), [seekTo]);
   const skipForward = useCallback(() => seekTo(duration), [seekTo, duration]);

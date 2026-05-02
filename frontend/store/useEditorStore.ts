@@ -52,6 +52,13 @@ interface EditorStore {
   transcript: WordTimestamp[];
   deletedWordIds: Set<string>;
 
+  // ── Selection / playback navigation ──────────────────────────────────────
+  selectedWordIds: Set<string>;
+  lastClickedIndex: number | null;
+  seekTime: number | null;
+  currentTime: number;
+  splitMarkers: number[];
+
   // ── Actions ───────────────────────────────────────────────────────────────
   login: (secret: string) => void;
   logout: () => void;
@@ -68,6 +75,16 @@ interface EditorStore {
   setTranscript: (words: WordTimestamp[]) => void;
   toggleWordState: (wordId: string) => void;
   resetDeletedWords: () => void;
+
+  // Selection / playback actions
+  setSeekTime: (time: number) => void;
+  setSelectedWords: (ids: Set<string>) => void;
+  setLastClickedIndex: (index: number | null) => void;
+  bulkToggleWords: (ids: string[], isDeleted: boolean) => void;
+  setCurrentTime: (time: number) => void;
+  addSplitMarker: (time: number) => void;
+  removeSplitMarker: (time: number) => void;
+  clearSplitMarkers: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +123,12 @@ export const useEditorStore = create<EditorStore>((set) => ({
   transcript: [],
   deletedWordIds: new Set<string>(),
 
+  selectedWordIds: new Set<string>(),
+  lastClickedIndex: null,
+  seekTime: null,
+  currentTime: 0,
+  splitMarkers: [],
+
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   login: (secret) => {
@@ -131,6 +154,11 @@ export const useEditorStore = create<EditorStore>((set) => ({
       segments: [],
       transcript: [],
       deletedWordIds: new Set<string>(),
+      selectedWordIds: new Set<string>(),
+      lastClickedIndex: null,
+      seekTime: null,
+      currentTime: 0,
+      splitMarkers: [],
     });
   },
 
@@ -207,6 +235,11 @@ export const useEditorStore = create<EditorStore>((set) => ({
       durationSeconds: 0,
       transcript: [],
       deletedWordIds: new Set<string>(),
+      selectedWordIds: new Set<string>(),
+      lastClickedIndex: null,
+      seekTime: null,
+      currentTime: 0,
+      splitMarkers: [],
     }),
 
   // ── Word-level (Descript-style) ──────────────────────────────────────────
@@ -228,6 +261,42 @@ export const useEditorStore = create<EditorStore>((set) => ({
     }),
 
   resetDeletedWords: () => set({ deletedWordIds: new Set<string>() }),
+
+  // ── Selection / playback navigation ──────────────────────────────────────
+
+  setSeekTime: (time) => set({ seekTime: time }),
+
+  setSelectedWords: (ids) => set({ selectedWordIds: ids }),
+
+  setLastClickedIndex: (index) => set({ lastClickedIndex: index }),
+
+  bulkToggleWords: (ids, isDeleted) =>
+    set((s) => {
+      const next = new Set(s.deletedWordIds);
+      if (isDeleted) {
+        for (const id of ids) next.add(id);
+      } else {
+        for (const id of ids) next.delete(id);
+      }
+      return { deletedWordIds: next };
+    }),
+
+  setCurrentTime: (time) => set({ currentTime: time }),
+
+  addSplitMarker: (time) =>
+    set((s) => {
+      // Dedupe within ~1 frame so a double-click doesn't stack markers.
+      if (s.splitMarkers.some((m) => Math.abs(m - time) < 0.0005)) return s;
+      const next = [...s.splitMarkers, time].sort((a, b) => a - b);
+      return { splitMarkers: next };
+    }),
+
+  removeSplitMarker: (time) =>
+    set((s) => ({
+      splitMarkers: s.splitMarkers.filter((m) => Math.abs(m - time) >= 0.0005),
+    })),
+
+  clearSplitMarkers: () => set({ splitMarkers: [] }),
 }));
 
 export const rehydrateAuth = () => {

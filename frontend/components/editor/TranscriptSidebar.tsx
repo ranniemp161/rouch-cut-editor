@@ -1,28 +1,80 @@
 "use client";
 
-import { useMemo } from "react";
-import { RotateCcw } from "lucide-react";
+import { useMemo, type MouseEvent } from "react";
+import { RotateCcw, Scissors, RotateCw } from "lucide-react";
 import { useEditorStore } from "@/store/useEditorStore";
+import { useContextMenu } from "@/hooks/useContextMenu";
 import type { WordTimestamp } from "@/types";
 
 /**
  * Word-level interactive transcript (Descript / Gling style).
- * Each word is an independent <span> — clicking it toggles its membership
- * in `deletedWordIds`. Deleted words remain in the visual flow so users
- * can restore them, but get a strikethrough + muted styling.
  *
- * Words are visually grouped into paragraphs by sentence-ending punctuation
- * (`.`, `?`, `!`). The click handler is always on the inner <span>, never
- * on the paragraph wrapper.
+ * Interactions:
+ *  - Click           → seek video to word.start, clear multi-selection.
+ *  - Shift+Click     → extend selection from lastClickedIndex (no seek).
+ *  - Right-click     → open context menu; selects the word if not already selected.
  */
 export function TranscriptSidebar() {
   const transcript = useEditorStore((s) => s.transcript);
   const deletedWordIds = useEditorStore((s) => s.deletedWordIds);
-  const toggleWordState = useEditorStore((s) => s.toggleWordState);
+  const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
+  const lastClickedIndex = useEditorStore((s) => s.lastClickedIndex);
+  const setSeekTime = useEditorStore((s) => s.setSeekTime);
+  const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
+  const setLastClickedIndex = useEditorStore((s) => s.setLastClickedIndex);
+  const bulkToggleWords = useEditorStore((s) => s.bulkToggleWords);
   const resetDeletedWords = useEditorStore((s) => s.resetDeletedWords);
+
+  const menu = useContextMenu();
+
+  // Stable index lookup so Shift-click can resolve range without an O(n) scan
+  // on every interaction.
+  const indexById = useMemo(() => {
+    const m = new Map<string, number>();
+    transcript.forEach((w, i) => m.set(w.id, i));
+    return m;
+  }, [transcript]);
 
   const paragraphs = useMemo(() => groupIntoParagraphs(transcript), [transcript]);
   const deletedCount = deletedWordIds.size;
+
+  const handleWordClick = (e: MouseEvent<HTMLSpanElement>, word: WordTimestamp) => {
+    const index = indexById.get(word.id);
+    if (index === undefined) return;
+
+    if (e.shiftKey && lastClickedIndex !== null) {
+      const [from, to] =
+        lastClickedIndex < index ? [lastClickedIndex, index] : [index, lastClickedIndex];
+      const next = new Set<string>();
+      for (let i = from; i <= to; i++) next.add(transcript[i].id);
+      setSelectedWords(next);
+      return;
+    }
+
+    setSelectedWords(new Set());
+    setLastClickedIndex(index);
+    setSeekTime(word.start);
+  };
+
+  const handleContextMenu = (e: MouseEvent<HTMLSpanElement>, word: WordTimestamp) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    if (!selectedWordIds.has(word.id)) {
+      setSelectedWords(new Set([word.id]));
+      const index = indexById.get(word.id);
+      if (index !== undefined) setLastClickedIndex(index);
+    }
+
+    menu.open(e.clientX, e.clientY);
+  };
+
+  const applyAndClose = (isDeleted: boolean) => {
+    const ids = Array.from(selectedWordIds);
+    if (ids.length > 0) bulkToggleWords(ids, isDeleted);
+    setSelectedWords(new Set());
+    menu.close();
+  };
 
   return (
     <aside
@@ -49,7 +101,9 @@ export function TranscriptSidebar() {
                   key={word.id}
                   word={word}
                   isDeleted={deletedWordIds.has(word.id)}
-                  onClick={() => toggleWordState(word.id)}
+                  isSelected={selectedWordIds.has(word.id)}
+                  onClick={(e) => handleWordClick(e, word)}
+                  onContextMenu={(e) => handleContextMenu(e, word)}
                 />
               ))}
             </p>
@@ -58,6 +112,31 @@ export function TranscriptSidebar() {
       </div>
 
       {deletedCount > 0 && <Footer total={transcript.length} deleted={deletedCount} />}
+
+      {menu.isOpen && (
+        <div
+          // Stop the global mousedown closer from firing before our buttons run.
+          onMouseDown={(e) => e.stopPropagation()}
+          onContextMenu={(e) => e.preventDefault()}
+          className="fixed z-50 min-w-[160px] py-1 bg-zinc-800 border border-zinc-700 shadow-xl rounded-md text-[12px] text-zinc-200"
+          style={{ left: menu.x, top: menu.y }}
+        >
+          <button
+            onClick={() => applyAndClose(true)}
+            className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-zinc-700/70 hover:text-red-300 transition-colors"
+          >
+            <Scissors size={12} />
+            Delete
+          </button>
+          <button
+            onClick={() => applyAndClose(false)}
+            className="flex items-center gap-2 w-full px-3 py-1.5 text-left hover:bg-zinc-700/70 hover:text-emerald-300 transition-colors"
+          >
+            <RotateCw size={12} />
+            Restore
+          </button>
+        </div>
+      )}
     </aside>
   );
 }
@@ -69,22 +148,31 @@ export function TranscriptSidebar() {
 interface WordProps {
   word: WordTimestamp;
   isDeleted: boolean;
-  onClick: () => void;
+  isSelected: boolean;
+  onClick: (e: MouseEvent<HTMLSpanElement>) => void;
+  onContextMenu: (e: MouseEvent<HTMLSpanElement>) => void;
 }
 
-function Word({ word, isDeleted, onClick }: WordProps) {
+function Word({ word, isDeleted, isSelected, onClick, onContextMenu }: WordProps) {
   const base =
     "inline-block px-1 py-0.5 mr-1 rounded cursor-pointer select-none transition-colors duration-100";
 
-  const stateClasses = isDeleted
-    ? "opacity-40 line-through text-red-400/70"
-    : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
+  // Selection wins on the background; deletion still applies its strikethrough
+  // on top so a selected-and-deleted word reads correctly.
+  const selectionClasses = isSelected
+    ? "bg-purple-600/40 text-purple-100"
+    : isDeleted
+      ? "opacity-40 line-through text-red-400/70"
+      : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
+
+  const deletedOverlay = isSelected && isDeleted ? " line-through opacity-70" : "";
 
   return (
     <span
-      className={`${base} ${stateClasses}`}
+      className={`${base} ${selectionClasses}${deletedOverlay}`}
       onClick={onClick}
-      title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s${isDeleted ? "  ·  click to restore" : "  ·  click to cut"}`}
+      onContextMenu={onContextMenu}
+      title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`}
     >
       {word.word}
     </span>
@@ -152,11 +240,6 @@ function Footer({ total, deleted }: { total: number; deleted: number }) {
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Split the flat word list into visual paragraphs at sentence-ending
- * punctuation. The click handler stays on each individual <span>, so the
- * grouping is purely cosmetic and does not affect interaction.
- */
 function groupIntoParagraphs(words: WordTimestamp[]): WordTimestamp[][] {
   const groups: WordTimestamp[][] = [];
   let current: WordTimestamp[] = [];
