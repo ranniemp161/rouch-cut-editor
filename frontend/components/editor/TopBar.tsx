@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOut, Scissors } from "lucide-react";
+import { LogOut, Scissors, Trash2 } from "lucide-react";
 import type { ExportFormat } from "@/lib/api";
 import { useEditorStore } from "@/store/useEditorStore";
 import { ExportMenu } from "./ExportMenu";
@@ -8,9 +8,10 @@ import { ExportMenu } from "./ExportMenu";
 interface Props {
   onExport: (format: ExportFormat) => void;
   isExporting: boolean;
+  onDeleteAll: () => void;
 }
 
-export function TopBar({ onExport, isExporting }: Props) {
+export function TopBar({ onExport, isExporting, onDeleteAll }: Props) {
   const logout = useEditorStore((s) => s.logout);
   const mediaId = useEditorStore((s) => s.mediaId);
   const pipelineStage = useEditorStore((s) => s.pipelineStage);
@@ -36,6 +37,15 @@ export function TopBar({ onExport, isExporting }: Props) {
       )}
 
       <div className="flex-1" />
+
+      <button
+        onClick={onDeleteAll}
+        className="flex items-center gap-1.5 px-3 py-1 mr-2 rounded text-[11px] font-medium transition-colors bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300"
+        title="Clear all storage and projects"
+      >
+        <Trash2 size={11} />
+        Clear All Data
+      </button>
 
       <ExportMenu onExport={onExport} disabled={!canExport} isExporting={isExporting} />
 

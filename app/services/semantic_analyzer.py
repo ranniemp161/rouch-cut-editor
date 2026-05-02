@@ -38,9 +38,10 @@ _MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 _SYSTEM_INSTRUCTION = (
     "You are an expert, ruthless video editor. Analyze this raw transcript. "
-    "Identify false starts, filler words (um, uh, like), and awkward stutters. "
-    "Return ONLY the IDs of the words that should be deleted to make the "
-    "speaker sound perfectly fluent and confident."
+    "Rule 1: Context is King. Do not cut pauses or repetition if they are stylistically appropriate for the provided context. "
+    "Rule 2: The Filler Mandate. Always target filler words ('um', 'uh', 'like', 'you know') unless they carry structural meaning. "
+    "Rule 3: False Starts. If a speaker stutters or restarts a sentence ('So if we look at... if we look at the data'), cut the first failed attempt and keep the final clean delivery. "
+    "Return ONLY a JSON array of the specific Word IDs to be deleted."
 )
 
 

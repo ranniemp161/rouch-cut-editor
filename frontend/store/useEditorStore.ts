@@ -66,7 +66,7 @@ interface EditorStore {
   setPipelineStage: (stage: PipelineStage, error?: string) => void;
   setUploadProgress: (pct: number) => void;
   setBackendIds: (ids: Partial<Pick<EditorStore, "userId" | "projectId" | "mediaId" | "transcriptId">>) => void;
-  setAnalysis: (words: WordItem[], segments: AnalysisSegment[], meta: { frameRate: number; totalFrames: number; durationSeconds: number }) => void;
+  setAnalysis: (words: WordItem[], segments: AnalysisSegment[], meta: { frameRate: number; totalFrames: number; durationSeconds: number; initialDeletedIds: string[] }) => void;
   toggleSegment: (startS: number) => void;
   setSilenceThreshold: (t: number) => void;
   clearMedia: () => void;
@@ -77,7 +77,7 @@ interface EditorStore {
   resetDeletedWords: () => void;
 
   // Selection / playback actions
-  setSeekTime: (time: number) => void;
+  setSeekTime: (time: number | null) => void;
   setSelectedWords: (ids: Set<string>) => void;
   setLastClickedIndex: (index: number | null) => void;
   bulkToggleWords: (ids: string[], isDeleted: boolean) => void;
@@ -191,14 +191,10 @@ export const useEditorStore = create<EditorStore>((set) => ({
       end: w.end,
     }));
 
-    // Seed the deletion set with whatever the AI editor flagged so those
-    // words appear struck-through immediately. The user can still toggle
-    // any of them back on with a click.
-    const deletedWordIds = new Set<string>(
-      transcript
-        .filter((_, i) => words[i].ai_cut === true)
-        .map((w) => w.id)
-    );
+    // Seed the deletion set with whatever the backend flagged (AI semantic cuts
+    // plus math-based silence gaps) so those appear struck-through immediately.
+    // The user can still toggle any of them back on with a click.
+    const deletedWordIds = new Set<string>(meta.initialDeletedIds);
 
     set({
       analysisWords: words,

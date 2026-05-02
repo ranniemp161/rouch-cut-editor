@@ -34,17 +34,44 @@ async def upload_media(
 
     # 1. ffprobe + Whisper
     transcript_data = await media_service.process_video(file)
-    words: list[dict] = transcript_data["word_level_data"]
+    raw_words: list[dict] = transcript_data["word_level_data"]
+    silence_threshold = transcript_data.get("silence_threshold_used", 0.5)
+    silence_pad = 0.15
 
-    # 2. Stamp each word with a stable string ID so Gemini can refer back to it.
-    for i, w in enumerate(words, start=1):
-        w["id"] = str(i)
+    words = []
+    spoken_words = []
+    word_id_counter = 1
+
+    # 2. Stamp each word with a stable string ID and insert [SILENCE] words.
+    for i, w in enumerate(raw_words):
+        w["id"] = str(word_id_counter)
+        word_id_counter += 1
+        words.append(w)
+        spoken_words.append(w)
+        
+        if i < len(raw_words) - 1:
+            next_w = raw_words[i+1]
+            gap_start = w["end"]
+            gap_end = next_w["start"]
+            if gap_end - gap_start > silence_threshold:
+                padded_start = round(gap_start + silence_pad, 3)
+                padded_end = round(gap_end - silence_pad, 3)
+                if padded_end > padded_start:
+                    words.append({
+                        "id": f"sil-{word_id_counter}",
+                        "word": "[SILENCE]",
+                        "start": padded_start,
+                        "end": padded_end,
+                        "probability": 1.0,
+                        "is_silence": True
+                    })
+                    word_id_counter += 1
 
     # 3. Semantic cut suggestions from Gemini (best-effort; non-fatal).
     #    Run in a thread-pool so the blocking SDK call doesn't stall the event loop.
     loop = asyncio.get_event_loop()
     ai_cut_ids: list[str] = await loop.run_in_executor(
-        None, semantic_analyzer.analyze_transcript_for_mistakes, words
+        None, semantic_analyzer.analyze_transcript_for_mistakes, spoken_words
     )
     cut_set = set(ai_cut_ids)
     for w in words:
@@ -146,6 +173,11 @@ def get_analysis(
 
     raw_segments = analysis_service.analyze_transcript(words, asset.duration_seconds, silence_threshold)
 
+    initial_deleted_ids = []
+    for w in words:
+        if w.get("ai_cut") or w.get("is_silence"):
+            initial_deleted_ids.append(w.get("id"))
+
     return AnalysisResult(
         words=[WordItem(**w) for w in words],
         segments=[AnalysisSegment(**s) for s in raw_segments],
@@ -153,4 +185,5 @@ def get_analysis(
         frame_rate=asset.frame_rate,
         total_frames=asset.total_frames,
         silence_threshold=silence_threshold,
+        initial_deleted_ids=initial_deleted_ids,
     )

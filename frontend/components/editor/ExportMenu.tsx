@@ -7,6 +7,7 @@ import type { ExportFormat } from "@/lib/api";
 const FORMATS: { value: ExportFormat; label: string }[] = [
   { value: "CMX3600-EDL", label: "CMX 3600 EDL" },
   { value: "FCP7-XML", label: "FCP7 XML" },
+  { value: "MP4", label: "FFmpeg Render Script" },
 ];
 
 interface Props {

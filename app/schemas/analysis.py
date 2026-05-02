@@ -9,6 +9,7 @@ class WordItem(BaseModel):
     # Optional because older transcripts (pre semantic-cut work) lack these.
     id: str | None = None
     ai_cut: bool = False
+    is_silence: bool = False
 
 
 class AnalysisSegment(BaseModel):
@@ -25,3 +26,4 @@ class AnalysisResult(BaseModel):
     frame_rate: float
     total_frames: int
     silence_threshold: float
+    initial_deleted_ids: list[str] = []

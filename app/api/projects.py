@@ -35,6 +35,14 @@ def list_projects(session: SessionDep, user_id: uuid.UUID | None = None) -> list
     return list(session.exec(query).all())
 
 
+@router.delete("/all", status_code=status.HTTP_204_NO_CONTENT)
+def delete_all_projects(session: SessionDep) -> None:
+    projects = session.exec(select(Project)).all()
+    for project in projects:
+        session.delete(project)
+    session.commit()
+
+
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_project(project_id: uuid.UUID, session: SessionDep) -> None:
     project = session.get(Project, project_id)

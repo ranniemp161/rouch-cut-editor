@@ -69,7 +69,7 @@ export default function MainEditor() {
         />
       )}
 
-      <TopBar onExport={pipeline.exportFile} isExporting={pipeline.isExporting} />
+      <TopBar onExport={pipeline.exportFile} isExporting={pipeline.isExporting} onDeleteAll={pipeline.deleteAll} />
 
       <div className="flex flex-1 overflow-hidden min-h-0">
         <MediaBin onFileSelect={selectFile} onDelete={pipeline.deleteCurrent} />

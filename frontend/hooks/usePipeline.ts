@@ -59,6 +59,7 @@ export function usePipeline(onBeforeDelete?: () => void) {
         frameRate: result.frame_rate,
         totalFrames: result.total_frames,
         durationSeconds: result.duration_seconds,
+        initialDeletedIds: result.initial_deleted_ids,
       });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Pipeline failed";
@@ -79,6 +80,7 @@ export function usePipeline(onBeforeDelete?: () => void) {
           frameRate: result.frame_rate,
           totalFrames: result.total_frames,
           durationSeconds: result.duration_seconds,
+          initialDeletedIds: result.initial_deleted_ids,
         });
       } catch {
         /* keep existing segments on transient failure */
@@ -91,22 +93,26 @@ export function usePipeline(onBeforeDelete?: () => void) {
 
   const exportFile = useCallback(
     async (format: ExportFormat) => {
-      const { mediaId, mediaFile, silenceThreshold } = useEditorStore.getState();
+      const { mediaId, silenceThreshold } = useEditorStore.getState();
       if (!mediaId || isExporting) return;
       setIsExporting(true);
       try {
-        const content = await generateExport(mediaId, silenceThreshold, 5, format);
-        const stem = mediaFile?.name.replace(/\.[^.]+$/, "") ?? "export";
-        const ext = format === "CMX3600-EDL" ? "edl" : "xml";
-        const mime = format === "CMX3600-EDL" ? "text/plain" : "application/xml";
-        downloadFile(content, `${stem}.${ext}`, mime);
+        const deletedWordIds = Array.from(store.deletedWordIds);
+        const content = await generateExport(mediaId, silenceThreshold, 5, deletedWordIds, format);
+        let ext = "txt";
+        let mime = "text/plain";
+        if (format === "FCP7-XML") { ext = "xml"; mime = "application/xml"; }
+        if (format === "CMX3600-EDL") { ext = "edl"; }
+        if (format === "FFMPEG-SCRIPT") { ext = "sh"; }
+        if (format === "MP4") { ext = "sh"; } // FFMPEG-SCRIPT and MP4 return bash script for safety
+        downloadFile(content, `export.${ext}`, mime);
       } catch (err) {
         console.error("Export failed:", err);
       } finally {
         setIsExporting(false);
       }
     },
-    [isExporting]
+    [isExporting, store]
   );
 
   // ── Delete current media (DB + local state) ───────────────────────────────
@@ -128,5 +134,19 @@ export function usePipeline(onBeforeDelete?: () => void) {
     store.clearMedia();
   }, [store, onBeforeDelete]);
 
-  return { runPipeline, reanalyze, exportFile, deleteCurrent, isExporting };
+  const deleteAll = useCallback(async () => {
+    const ok = window.confirm(
+      "Are you sure you want to delete ALL projects and their media? This cannot be undone."
+    );
+    if (!ok) return;
+    try {
+      const { deleteAllProjects } = await import("@/lib/api");
+      await deleteAllProjects();
+      store.clearMedia();
+    } catch (err) {
+      console.error("Delete all failed:", err);
+    }
+  }, [store]);
+
+  return { runPipeline, reanalyze, exportFile, deleteCurrent, deleteAll, isExporting };
 }

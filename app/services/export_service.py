@@ -38,6 +38,10 @@ def generate(
         content = _render_edl(asset, segments)
         return content, "text/plain"
 
+    if request.format == "FFMPEG-SCRIPT" or request.format == "MP4":
+        content = _render_ffmpeg_script(asset, segments)
+        return content, "text/plain"
+
     content = _render_fcp7_xml(
         transcript_id=str(transcript.id),
         filename=asset.original_filename,
@@ -65,19 +69,42 @@ def _build_segments(
     if not word_data:
         return [(0, total_frames - 1)]
 
-    gaps = find_silence_gaps(word_data, request.silence_threshold)
-    gap_set: set[tuple[float, float]] = set(gaps)
+    duration = total_frames / frame_rate
 
-    runs: list[tuple[float, float]] = []
-    seg_start = word_data[0]["start"]
+    if request.deleted_word_ids:
+        deleted_set = set(request.deleted_word_ids)
+        deleted_words = sorted([w for w in word_data if w.get("id") in deleted_set], key=lambda x: x["start"])
+        merged_cuts = []
+        for w in deleted_words:
+            if not merged_cuts:
+                merged_cuts.append([w["start"], w["end"]])
+            else:
+                last = merged_cuts[-1]
+                if w["start"] <= last[1] + 0.005:
+                    last[1] = max(last[1], w["end"])
+                else:
+                    merged_cuts.append([w["start"], w["end"]])
+        
+        runs = []
+        cursor = 0.0
+        for cut in merged_cuts:
+            if cut[0] > cursor:
+                runs.append((cursor, cut[0]))
+            cursor = cut[1]
+        if cursor < duration:
+            runs.append((cursor, duration))
+    else:
+        gaps = find_silence_gaps(word_data, request.silence_threshold)
+        gap_set: set[tuple[float, float]] = set(gaps)
 
-    for prev, curr in zip(word_data, word_data[1:]):
-        gap = (prev["end"], curr["start"])
-        if gap in gap_set:
-            runs.append((seg_start, prev["end"]))
-            seg_start = curr["start"]
-
-    runs.append((seg_start, word_data[-1]["end"]))
+        runs = []
+        seg_start = word_data[0]["start"]
+        for prev, curr in zip(word_data, word_data[1:]):
+            gap = (prev["end"], curr["start"])
+            if gap in gap_set:
+                runs.append((seg_start, prev["end"]))
+                seg_start = curr["start"]
+        runs.append((seg_start, word_data[-1]["end"]))
 
     segments: list[tuple[int, int]] = []
     for start_s, end_s in runs:
@@ -167,3 +194,63 @@ def _render_edl(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:
         )
 
     return "\n".join(lines)
+
+
+def _render_ffmpeg_script(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:
+    fps = asset.frame_rate
+    crossfade_duration = 2 / fps
+    
+    script = ["#!/bin/bash", f"# Export for {asset.original_filename}", ""]
+    
+    if not segments:
+        return "\n".join(script) + "\necho 'No segments to export'\n"
+
+    filename = asset.original_filename
+    filter_parts = []
+    
+    for i, (in_f, out_f) in enumerate(segments):
+        start_time = in_f / fps
+        end_time = out_f / fps
+        filter_parts.append(
+            f"[0:v]trim=start={start_time:.3f}:end={end_time:.3f},setpts=PTS-STARTPTS[v{i}];"
+        )
+        filter_parts.append(
+            f"[0:a]atrim=start={start_time:.3f}:end={end_time:.3f},asetpts=PTS-STARTPTS[a{i}];"
+        )
+        
+    if len(segments) == 1:
+        filter_parts.append("[v0]copy[vout]; [a0]acopy[aout];")
+    else:
+        v_curr = "[v0]"
+        a_curr = "[a0]"
+        cumulative_duration = (segments[0][1] - segments[0][0]) / fps
+        
+        for i in range(1, len(segments)):
+            v_next = f"[v{i}]"
+            a_next = f"[a{i}]"
+            v_out = f"[vx{i}]" if i < len(segments) - 1 else "[vout]"
+            a_out = f"[ax{i}]" if i < len(segments) - 1 else "[aout]"
+            
+            offset = cumulative_duration - crossfade_duration
+            
+            filter_parts.append(f"{v_curr}{v_next}xfade=transition=fade:duration={crossfade_duration:.3f}:offset={offset:.3f}{v_out};")
+            filter_parts.append(f"{a_curr}{a_next}acrossfade=d={crossfade_duration:.3f}{a_out};")
+            
+            v_curr = v_out
+            a_curr = a_out
+            
+            segment_dur = (segments[i][1] - segments[i][0]) / fps
+            cumulative_duration += segment_dur - crossfade_duration
+
+    filter_complex = "".join(filter_parts)
+    
+    cmd = (
+        f"ffmpeg -y -i \"{filename}\" "
+        f"-filter_complex \"{filter_complex}\" "
+        f"-map \"[vout]\" -map \"[aout]\" "
+        f"-c:v libx264 -c:a aac "
+        f"\"rendered_{filename}.mp4\""
+    )
+    
+    script.append(cmd)
+    return "\n".join(script)

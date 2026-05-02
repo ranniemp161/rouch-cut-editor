@@ -60,3 +60,5 @@ frontend/.env.production.local
 Thumbs.db
 .claude
 
+#context
+context/
