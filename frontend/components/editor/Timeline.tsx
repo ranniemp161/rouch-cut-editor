@@ -26,6 +26,8 @@ const ZOOM_MIN = 1;
 const ZOOM_MAX = 20;
 const ZOOM_STEP = 1.2;
 
+const LANE_HEIGHT = 56;
+
 interface MarqueeRect {
   startX: number;
   startY: number;
@@ -548,7 +550,7 @@ export function Timeline() {
   }, [splitMarkers, editMap, canRender]);
 
   return (
-    <div className="relative w-full bg-zinc-950 flex flex-col select-none" style={{ height: 180 }}>
+    <div className="relative w-full h-full bg-zinc-950 flex flex-col select-none">
       {/* Toolbar: edited length + zoom */}
       <div className="absolute top-1 right-2 z-40 flex items-center gap-2 text-zinc-400">
         {canRender && (
@@ -635,7 +637,7 @@ export function Timeline() {
             />
             <TrackLane
               label="A1"
-              top="50%"
+              top={LANE_HEIGHT}
               canRender={canRender}
               editedDuration={editedDuration}
               editedDurationRef={editedDurationRef}
@@ -756,7 +758,7 @@ function TrackLane({
   onClipClick, onClipContextMenu,
 }: TrackLaneProps) {
   return (
-    <div className="absolute left-0 right-0 h-1/2" style={{ top }}>
+    <div className="absolute left-0 right-0" style={{ top, height: LANE_HEIGHT }}>
       <span className="absolute left-2 top-1 text-[9px] font-mono text-zinc-700 z-10 pointer-events-none tracking-wider">
         {label}
       </span>

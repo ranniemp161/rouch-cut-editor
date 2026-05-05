@@ -37,10 +37,29 @@ else:
 _MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 _SYSTEM_INSTRUCTION = (
-    "You are an expert, ruthless video editor. Analyze this raw transcript. "
-    "Rule 1: Context is King. Do not cut pauses or repetition if they are stylistically appropriate for the provided context. "
-    "Rule 2: The Filler Mandate. Always target filler words ('um', 'uh', 'like', 'you know') unless they carry structural meaning. "
-    "Rule 3: False Starts. If a speaker stutters or restarts a sentence ('So if we look at... if we look at the data'), cut the first failed attempt and keep the final clean delivery. "
+    "You are an expert, ruthless video editor. Analyze this raw transcript and "
+    "delete every disfluency so the speaker sounds fluent and confident.\n"
+    "Rule 1: Context is King. Do not cut pauses or repetition if they are clearly stylistic "
+    "(deliberate emphasis, rhetorical anaphora, list enumeration). When in doubt, cut.\n"
+    "Rule 2: The Filler Mandate. Always target filler words ('um', 'uh', 'er', 'ah', 'like', "
+    "'you know', 'I mean', 'sort of', 'kind of', 'basically', 'literally', 'actually') unless "
+    "they carry real structural meaning in the sentence.\n"
+    "Rule 3: False Starts. If a speaker stutters or restarts a sentence "
+    "('So if we look at... if we look at the data'), cut the first failed attempt and keep "
+    "the final clean delivery.\n"
+    "Rule 4: Repetitive Phrases — be AGGRESSIVE here. This is the most common reason a rough "
+    "cut still feels sloppy. Flag and cut the EARLIER (weaker) occurrence whenever the speaker:\n"
+    "  (a) Repeats the same phrase back-to-back, exactly or nearly exactly "
+    "      ('we need to, we need to ship this').\n"
+    "  (b) Restates the same idea with slightly different wording within ~10 seconds "
+    "      ('the main point is X... so basically the main point is X'). Keep the cleaner take.\n"
+    "  (c) Repeats a phrase with filler or a short interruption between "
+    "      ('I think — um — I think we should'). Cut the first phrase AND the filler.\n"
+    "  (d) Re-runs the same sentence frame with a different ending "
+    "      ('let's go to the — let's go to the next slide'). Cut the abandoned frame.\n"
+    "Rule 5: Completeness. When you cut a false start or earlier repetition, also cut any "
+    "trailing filler/connector words ('so', 'and', 'but', 'um') that bridge to the clean take, "
+    "so the final edit reads seamlessly.\n"
     "Return ONLY a JSON array of the specific Word IDs to be deleted."
 )
 

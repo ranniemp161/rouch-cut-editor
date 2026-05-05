@@ -53,41 +53,90 @@ def _find_silence_cuts(words: list[dict], threshold: float) -> list[dict]:
     return cuts
 
 
+# Filler tokens that often sit *between* a stumble and its clean retake
+# ("I think — um, I think we should…"). When matching repeated n-grams we
+# allow up to MAX_FILLER_GAP of these to appear in the gap between the two
+# occurrences and still treat them as a single repetition (the first phrase
+# AND the intervening filler are cut together).
+_FILLERS = {
+    "um", "uh", "er", "ah", "hmm", "mm", "mmm",
+    "like", "so", "and", "but", "or",
+    "you", "know", "i", "mean",  # "you know", "I mean" — matched as tokens
+    "well", "okay", "ok", "right",
+    "basically", "actually", "literally", "really",
+    "sort", "kind", "of",  # "sort of", "kind of"
+}
+_MAX_FILLER_GAP = 4  # tokens of filler allowed between the two occurrences
+
+
 def _find_repetition_cuts(words: list[dict], min_n: int = 2, max_n: int = 6) -> list[dict]:
     """
-    Detect immediately consecutive n-gram repetitions.
-    Marks the *first* occurrence as the cut (assumed to be the stumble/false start).
+    Detect consecutive (or near-consecutive) n-gram repetitions and mark the
+    *first* occurrence — plus any intervening filler — as the cut.
+
+    Catches three patterns:
+      1. Exact back-to-back: "we need to, we need to ship"
+      2. Filler-separated:   "I think — um — I think we should"
+      3. Near-exact:         "let's go to the next slide, let's go to the slide"
+         (n-grams of length >= 4 may differ by one token)
     """
     reps = []
     # Exclude silence markers — they carry no spoken content and would corrupt
     # n-gram matching across pause boundaries.
     words = [w for w in words if not w.get("is_silence")]
+    norms = [_norm(w["word"]) for w in words]
+
     i = 0
     while i < len(words):
         matched = False
         for n in range(max_n, min_n - 1, -1):
-            if i + 2 * n > len(words):
+            if i + n > len(words):
                 continue
-            pattern = [_norm(w["word"]) for w in words[i : i + n]]
-            following = [_norm(w["word"]) for w in words[i + n : i + 2 * n]]
-            if pattern == following:
-                reps.append(
-                    {
-                        "start_s": words[i]["start"],
-                        "end_s": words[i + n - 1]["end"],
-                        "reason": "repetition",
-                    }
-                )
-                i += n
-                matched = True
+            pattern = norms[i : i + n]
+            # Walk forward up to MAX_FILLER_GAP filler tokens before the candidate
+            # second occurrence. gap == 0 is the original exact-adjacency case.
+            for gap in range(_MAX_FILLER_GAP + 1):
+                j = i + n + gap
+                if j + n > len(words):
+                    break
+                if gap > 0 and not all(t in _FILLERS for t in norms[i + n : j]):
+                    break  # non-filler token in the gap → not a stumble
+                following = norms[j : j + n]
+                if _ngram_match(pattern, following, n):
+                    # Cut from start of the first occurrence through the end of
+                    # the gap (i.e. right up to where the clean retake begins).
+                    reps.append(
+                        {
+                            "start_s": words[i]["start"],
+                            "end_s": words[j - 1]["end"] if gap > 0 else words[i + n - 1]["end"],
+                            "reason": "repetition",
+                        }
+                    )
+                    i = j  # resume scanning at the clean retake
+                    matched = True
+                    break
+            if matched:
                 break
         if not matched:
             i += 1
     return reps
 
 
+def _ngram_match(a: list[str], b: list[str], n: int) -> bool:
+    """
+    Exact match for short n-grams; allow one differing token for n >= 4.
+    Catches restatements like "go to the next slide" / "go to the last slide".
+    """
+    if a == b:
+        return True
+    if n < 4:
+        return False
+    diffs = sum(1 for x, y in zip(a, b) if x != y)
+    return diffs <= 1
+
+
 def _norm(word: str) -> str:
-    return word.lower().strip(".,!?;:")
+    return word.lower().strip(".,!?;:\"'")
 
 
 def _merge_overlapping(segments: list[dict]) -> list[dict]:

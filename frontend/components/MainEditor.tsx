@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import { useEditorStore } from "@/store/useEditorStore";
 import { saveEdits } from "@/lib/editsStorage";
@@ -101,6 +101,32 @@ export default function MainEditor() {
     };
   }, []);
 
+  const TIMELINE_MIN = 160;
+  const TIMELINE_MAX = 600;
+  const [timelineHeight, setTimelineHeight] = useState(280);
+  const dragStateRef = useRef<{ startY: number; startH: number } | null>(null);
+
+  const handleResizeDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dragStateRef.current = { startY: e.clientY, startH: timelineHeight };
+    const onMove = (ev: PointerEvent) => {
+      const s = dragStateRef.current;
+      if (!s) return;
+      const next = Math.max(TIMELINE_MIN, Math.min(TIMELINE_MAX, s.startH - (ev.clientY - s.startY)));
+      setTimelineHeight(next);
+    };
+    const onUp = () => {
+      dragStateRef.current = null;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+  }, [timelineHeight]);
+
   const fps = frameRate || 23.976;
   const activeDuration = player.duration || durationSeconds;
   const isCutting = pipelineStage === "uploading" || pipelineStage === "transcribing";
@@ -171,7 +197,14 @@ export default function MainEditor() {
         onCut={pipeline.runPipeline}
       />
 
-      <div className="px-6 pb-6 bg-[#111111]">
+      <div
+        onPointerDown={handleResizeDown}
+        className="h-1.5 mx-6 cursor-row-resize group flex items-center justify-center bg-[#111111]"
+        title="Drag to resize timeline"
+      >
+        <div className="h-px w-full bg-zinc-800 group-hover:bg-purple-500/60 transition-colors" />
+      </div>
+      <div className="px-6 pb-3 bg-[#111111]" style={{ height: timelineHeight }}>
         <Timeline />
       </div>
     </div>
