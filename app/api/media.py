@@ -130,17 +130,34 @@ def get_media_asset(asset_id: uuid.UUID, session: SessionDep) -> dict:
     }
 
 
+@router.delete("/uploads/purge", status_code=status.HTTP_200_OK)
+def purge_uploads(session: SessionDep) -> dict:
+    """
+    Wipe every file in UPLOADS_DIR and clear all MediaAsset rows.
+
+    Manual panic button for reclaiming local disk during testing.
+    """
+    assets = session.exec(select(MediaAsset)).all()
+    for asset in assets:
+        session.delete(asset)
+    session.commit()
+    files_removed = media_service.purge_uploads_dir()
+    return {"assets_removed": len(assets), "files_removed": files_removed}
+
+
 @router.delete("/{asset_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_media_asset(asset_id: uuid.UUID, session: SessionDep) -> None:
     """
     Delete a media asset and its dependent rows (transcripts, exports) via
-    SQLAlchemy cascade. Frees the Neon storage used by this clip's transcript.
+    SQLAlchemy cascade, plus the underlying video file on disk.
     """
     asset = session.get(MediaAsset, asset_id)
     if not asset:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found")
+    file_path = asset.file_path
     session.delete(asset)
     session.commit()
+    media_service.delete_asset_file(file_path)
 
 
 @router.get("/{asset_id}/analysis", response_model=AnalysisResult)

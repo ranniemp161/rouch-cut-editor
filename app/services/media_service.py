@@ -21,6 +21,34 @@ from app.services import transcription as transcription_service
 UPLOADS_DIR = "/app/uploads"
 
 
+def delete_asset_file(file_path: str | None) -> None:
+    """Best-effort removal of an asset's video and any sibling .wav extract."""
+    if not file_path:
+        return
+    for path in (file_path, file_path + ".wav"):
+        try:
+            if os.path.exists(path):
+                os.unlink(path)
+        except OSError:
+            pass
+
+
+def purge_uploads_dir() -> int:
+    """Delete every file inside UPLOADS_DIR. Returns count removed."""
+    if not os.path.isdir(UPLOADS_DIR):
+        return 0
+    removed = 0
+    for entry in os.listdir(UPLOADS_DIR):
+        path = os.path.join(UPLOADS_DIR, entry)
+        try:
+            if os.path.isfile(path):
+                os.unlink(path)
+                removed += 1
+        except OSError:
+            pass
+    return removed
+
+
 async def process_video(file: UploadFile) -> dict[str, Any]:
     """
     Probe *file* for media metadata and produce word-level timestamps.

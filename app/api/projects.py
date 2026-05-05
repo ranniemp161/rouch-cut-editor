@@ -6,6 +6,7 @@ from sqlmodel import select
 from app.api.deps import SessionDep
 from app.models.project import Project
 from app.schemas.project import ProjectCreate, ProjectResponse
+from app.services import media_service
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -41,6 +42,7 @@ def delete_all_projects(session: SessionDep) -> None:
     for project in projects:
         session.delete(project)
     session.commit()
+    media_service.purge_uploads_dir()
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)

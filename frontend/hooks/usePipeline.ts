@@ -129,7 +129,7 @@ export function usePipeline(onBeforeDelete?: () => void) {
   const deleteCurrent = useCallback(async () => {
     const { mediaId } = useEditorStore.getState();
     const ok = window.confirm(
-      "Remove this clip?\n\nThe transcript will be deleted from the database. The video file itself was never stored on disk."
+      "Remove this clip?\n\nThe transcript and the underlying video file on the server will both be deleted."
     );
     if (!ok) return;
     onBeforeDelete?.();

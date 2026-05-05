@@ -67,7 +67,7 @@ export function TopBar({ onExport, isExporting, onDeleteAll, onRenderMp4, isRend
       <button
         onClick={onDeleteAll}
         className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium transition-colors text-zinc-600 hover:text-red-400 hover:bg-red-900/20"
-        title="Clear all projects and data"
+        title="Clear all projects, transcripts, and uploaded video files"
       >
         <Trash2 size={11} />
       </button>
