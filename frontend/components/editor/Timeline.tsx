@@ -34,6 +34,13 @@ interface MarqueeRect {
   width: number;
 }
 
+// A persistent edited-time range painted on the tracks after the user
+// finishes a drag. Cleared on next click / Backspace.
+interface RangeSelection {
+  editedStart: number;
+  editedEnd: number;
+}
+
 // A clip on the edited timeline = one kept range, with the underlying word
 // IDs cached for selection.
 interface Clip {
@@ -56,6 +63,9 @@ export function Timeline() {
   const setLastClickedIndex = useEditorStore((s) => s.setLastClickedIndex);
   const bulkToggleWords = useEditorStore((s) => s.bulkToggleWords);
   const addSplitMarker = useEditorStore((s) => s.addSplitMarker);
+  const pushHistory = useEditorStore((s) => s.pushHistory);
+  const undo = useEditorStore((s) => s.undo);
+  const redo = useEditorStore((s) => s.redo);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const rulerRef = useRef<HTMLDivElement | null>(null);
@@ -63,6 +73,7 @@ export function Timeline() {
 
   const [isScrubbing, setIsScrubbing] = useState(false);
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
+  const [rangeSelection, setRangeSelection] = useState<RangeSelection | null>(null);
   const [zoom, setZoom] = useState(1);
   const pendingZoomCursor = useRef<{ time: number; cursorX: number } | null>(null);
 
@@ -75,6 +86,45 @@ export function Timeline() {
   );
   const editedDuration = editMap.editedDuration;
   const canRender = editedDuration > 0;
+
+  // Live edited-duration handle for the trim-drag handler — that handler runs
+  // on pointermove and needs the *current* pxPerSec, not the value at
+  // pointerdown (the timeline rescales as words are restored).
+  const editedDurationRef = useRef(editedDuration);
+  useEffect(() => {
+    editedDurationRef.current = editedDuration;
+  }, [editedDuration]);
+
+  // The persisted range-selection box is anchored in *edited time*; once any
+  // edit shifts the edit map, those coordinates point at the wrong source
+  // range. Clear the box on any underlying edit so we never paint a stale
+  // overlay. (Marquee-during-drag is unaffected — it lives in pixel space.)
+  useEffect(() => {
+    setRangeSelection(null);
+  }, [deletedWordIds, segments, splitMarkers]);
+
+  // After any edit, if the source-time playhead now falls inside a deleted
+  // region, jump the video forward to the next kept range. Without this the
+  // video element would happily play (and render audio for) freshly cut
+  // content the moment the user hits play. Fires only on edit-map changes,
+  // not on every timeupdate tick.
+  const lastEditMapRef = useRef(editMap);
+  useEffect(() => {
+    if (lastEditMapRef.current === editMap) return;
+    lastEditMapRef.current = editMap;
+    if (!canRender) return;
+    const nowSrc = useEditorStore.getState().currentTime;
+    const e = sourceToEdited(nowSrc, editMap);
+    if (e !== null) return;
+    for (const r of editMap.keptRanges) {
+      if (r.sourceStart >= nowSrc) {
+        setSeekTime(r.sourceStart);
+        return;
+      }
+    }
+    const last = editMap.keptRanges[editMap.keptRanges.length - 1];
+    if (last) setSeekTime(last.sourceEnd);
+  }, [editMap, canRender, setSeekTime]);
 
   // Build clip metadata once per edit-map change. Each kept range is further
   // subdivided by any split markers that fall inside it — a split turns one
@@ -126,11 +176,40 @@ export function Timeline() {
     return m;
   }, [transcript]);
 
+  // Per-clip trim limits in source-time. The trim handler clamps against
+  // these so a wild outward drag can't silently absorb the neighboring
+  // clip's content. Split-seam edges (where two clips share an exact
+  // source-time edge) get a no-op limit on that side — there's no dead
+  // zone there to restore from.
+  const clipLimits = useMemo(() => {
+    const SEAM_EPS = 0.001;
+    return clips.map((c, i) => {
+      const prev = clips[i - 1];
+      const next = clips[i + 1];
+      const leftLimit =
+        prev && Math.abs(prev.range.sourceEnd - c.range.sourceStart) < SEAM_EPS
+          ? c.range.sourceStart
+          : prev?.range.sourceEnd ?? 0;
+      const rightLimit =
+        next && Math.abs(next.range.sourceStart - c.range.sourceEnd) < SEAM_EPS
+          ? c.range.sourceEnd
+          : next?.range.sourceStart ?? sourceDuration;
+      return { leftLimit, rightLimit };
+    });
+  }, [clips, sourceDuration]);
+
   // Playhead position in edited coordinates.
+  // If the user just deleted the region the playhead sits in, the source
+  // time maps to "nowhere" — snap it to the seam between adjacent kept
+  // ranges so the cursor stays put visually instead of slamming back to 0.
   const playheadEdited = useMemo(() => {
     if (!canRender) return 0;
     const e = sourceToEdited(currentTime, editMap);
-    return e ?? 0;
+    if (e !== null) return e;
+    for (const r of editMap.keptRanges) {
+      if (r.sourceStart >= currentTime) return r.editedStart;
+    }
+    return editMap.editedDuration;
   }, [currentTime, editMap, canRender]);
   const playheadPct = canRender ? (playheadEdited / editedDuration) * 100 : 0;
 
@@ -211,11 +290,14 @@ export function Timeline() {
   const applyAndClose = useCallback(
     (isDeleted: boolean) => {
       const ids = Array.from(selectedWordIds);
-      if (ids.length > 0) bulkToggleWords(ids, isDeleted);
+      if (ids.length > 0) {
+        pushHistory();
+        bulkToggleWords(ids, isDeleted);
+      }
       setSelectedWords(new Set());
       menu.close();
     },
-    [bulkToggleWords, menu, selectedWordIds, setSelectedWords],
+    [bulkToggleWords, menu, pushHistory, selectedWordIds, setSelectedWords],
   );
 
   // ── Marquee — edited-time range, mapped back to source words ──────────────
@@ -227,6 +309,8 @@ export function Timeline() {
       const rect = el.getBoundingClientRect();
       const startX = e.clientX - rect.left;
       const startY = e.clientY - rect.top;
+      // Clear any persistent range selection from a previous drag.
+      setRangeSelection(null);
       setMarquee({ startX, startY, currentX: startX, currentY: startY, width: rect.width });
     },
     [editedDuration],
@@ -251,27 +335,34 @@ export function Timeline() {
     };
 
     const onUp = () => {
-      setMarquee((prev) => {
-        if (!prev) return prev;
-        const minX = Math.min(prev.startX, prev.currentX);
-        const maxX = Math.max(prev.startX, prev.currentX);
-        const dragged = maxX - minX > 2;
-        if (!dragged) {
-          setSelectedWords(new Set());
-          return null;
-        }
-        const eStart = (minX / prev.width) * editedDuration;
-        const eEnd = (maxX / prev.width) * editedDuration;
-        const next = new Set<string>();
-        for (const w of transcript) {
-          if (deletedWordIds.has(w.id)) continue;
-          const we = sourceToEdited(w.start, editMap);
-          if (we === null) continue;
-          if (we >= eStart && we <= eEnd) next.add(w.id);
-        }
-        setSelectedWords(next);
-        return null;
-      });
+      // Read marquee from the closure (it's the active drag) rather than
+      // computing it inside a setMarquee updater — calling other setState
+      // functions from within an updater is unsafe under StrictMode.
+      const prev = marquee;
+      setMarquee(null);
+      if (!prev) return;
+
+      const minX = Math.min(prev.startX, prev.currentX);
+      const maxX = Math.max(prev.startX, prev.currentX);
+      const dragged = maxX - minX > 2;
+      if (!dragged) {
+        setSelectedWords(new Set());
+        setRangeSelection(null);
+        return;
+      }
+      const eStart = (minX / prev.width) * editedDuration;
+      const eEnd = (maxX / prev.width) * editedDuration;
+      const next = new Set<string>();
+      for (const w of transcript) {
+        if (deletedWordIds.has(w.id)) continue;
+        const we = sourceToEdited(w.start, editMap);
+        if (we === null) continue;
+        if (we >= eStart && we <= eEnd) next.add(w.id);
+      }
+      setSelectedWords(next);
+      // Persist the box visually until the user clicks elsewhere or
+      // hits Backspace — matches NLE-style range deletion UX.
+      setRangeSelection({ editedStart: eStart, editedEnd: eEnd });
     };
 
     window.addEventListener("pointermove", onMove);
@@ -349,14 +440,32 @@ export function Timeline() {
       const now = state.currentTime;
       const k = e.key.toLowerCase();
 
+      // Undo / redo. Cmd on macOS, Ctrl elsewhere. Shift+Z and Y both redo.
+      if ((e.metaKey || e.ctrlKey) && k === "z" && !e.shiftKey) {
+        e.preventDefault();
+        undo();
+        setSelectedWords(new Set());
+        setRangeSelection(null);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (k === "y" || (k === "z" && e.shiftKey))) {
+        e.preventDefault();
+        redo();
+        setSelectedWords(new Set());
+        setRangeSelection(null);
+        return;
+      }
+
       // Backspace / Delete — drop the currently-selected words (i.e. the
       // selected clip). Falls through if nothing is selected so the browser
       // can still handle the key elsewhere.
       if (e.key === "Backspace" || e.key === "Delete") {
         if (state.selectedWordIds.size === 0) return;
         e.preventDefault();
+        pushHistory();
         bulkToggleWords(Array.from(state.selectedWordIds), true);
         setSelectedWords(new Set());
+        setRangeSelection(null);
         return;
       }
 
@@ -366,7 +475,10 @@ export function Timeline() {
         const insideKept = editMap.keptRanges.some(
           (r) => now > r.sourceStart + 0.005 && now < r.sourceEnd - 0.005,
         );
-        if (insideKept) addSplitMarker(now);
+        if (insideKept) {
+          pushHistory();
+          addSplitMarker(now);
+        }
         return;
       }
 
@@ -381,6 +493,7 @@ export function Timeline() {
         for (const w of state.transcript) {
           if (state.selectedWordIds.has(w.id) && w.end > lastEnd) lastEnd = w.end;
         }
+        pushHistory();
         bulkToggleWords(ids, true);
         setSelectedWords(new Set());
         if (k === "w" && lastEnd > 0) setSeekTime(lastEnd);
@@ -403,14 +516,18 @@ export function Timeline() {
         // Word is "inside" the ripple range if it overlaps it materially.
         if (w.end > lo + 0.001 && w.start < hi - 0.001) ids.push(w.id);
       }
-      if (ids.length > 0) bulkToggleWords(ids, true);
-      // Land the playhead just inside the previous kept range so it doesn't
-      // sit exactly on a boundary (which maps to null in source→edited).
-      if (k === "q") setSeekTime(Math.max(0, prev - 0.001));
+      if (ids.length > 0) {
+        pushHistory();
+        bulkToggleWords(ids, true);
+      }
+      // Q: snap to the boundary of the new cut (i.e. `prev`), never to 0:00.
+      // The source-time playhead stays where it was — the edited-time view
+      // recomputes naturally from the updated edit map.
+      if (k === "q" && prev > 0) setSeekTime(prev);
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap]);
+  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap, pushHistory, undo, redo]);
 
   // ── Ruler ticks (in edited-time) ──────────────────────────────────────────
   const rulerTicks = useMemo(() => {
@@ -431,7 +548,7 @@ export function Timeline() {
   }, [splitMarkers, editMap, canRender]);
 
   return (
-    <div className="relative w-full h-40 bg-zinc-950 flex flex-col select-none">
+    <div className="relative w-full bg-zinc-950 flex flex-col select-none" style={{ height: 180 }}>
       {/* Toolbar: edited length + zoom */}
       <div className="absolute top-1 right-2 z-40 flex items-center gap-2 text-zinc-400">
         {canRender && (
@@ -508,7 +625,9 @@ export function Timeline() {
               top={0}
               canRender={canRender}
               editedDuration={editedDuration}
+              editedDurationRef={editedDurationRef}
               clips={clips}
+              clipLimits={clipLimits}
               selectedWordIds={selectedWordIds}
               tone="video"
               onClipClick={handleClipClick}
@@ -519,7 +638,9 @@ export function Timeline() {
               top="50%"
               canRender={canRender}
               editedDuration={editedDuration}
+              editedDurationRef={editedDurationRef}
               clips={clips}
+              clipLimits={clipLimits}
               selectedWordIds={selectedWordIds}
               tone="audio"
               onClipClick={handleClipClick}
@@ -543,11 +664,24 @@ export function Timeline() {
               if (width < 2 && height < 2) return null;
               return (
                 <div
-                  className="absolute z-30 border border-purple-400/70 bg-purple-400/10 pointer-events-none rounded-[2px]"
+                  className="absolute z-30 border border-white/50 bg-white/20 pointer-events-none rounded-[2px]"
                   style={{ left, top, width, height }}
                 />
               );
             })()}
+
+            {/* Persistent range-selection box (shown until Backspace or
+                next click). Spans full track height so it visually scopes
+                the deletion area. */}
+            {rangeSelection && canRender && (
+              <div
+                className="absolute top-0 bottom-0 z-30 border border-white/50 bg-white/20 pointer-events-none rounded-[2px]"
+                style={{
+                  left: `${(rangeSelection.editedStart / editedDuration) * 100}%`,
+                  width: `${((rangeSelection.editedEnd - rangeSelection.editedStart) / editedDuration) * 100}%`,
+                }}
+              />
+            )}
           </div>
 
           {/* Playhead — distinct cap on the ruler + 1px line through the tracks */}
@@ -598,12 +732,19 @@ export function Timeline() {
 // TrackLane
 // ---------------------------------------------------------------------------
 
+interface ClipLimits {
+  leftLimit: number;
+  rightLimit: number;
+}
+
 interface TrackLaneProps {
   label: Lane;
   top: number | string;
   canRender: boolean;
   editedDuration: number;
+  editedDurationRef: React.RefObject<number>;
   clips: Clip[];
+  clipLimits: ClipLimits[];
   selectedWordIds: Set<string>;
   tone: "video" | "audio";
   onClipClick: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
@@ -611,7 +752,7 @@ interface TrackLaneProps {
 }
 
 function TrackLane({
-  label, top, canRender, editedDuration, clips, selectedWordIds, tone,
+  label, top, canRender, editedDuration, editedDurationRef, clips, clipLimits, selectedWordIds, tone,
   onClipClick, onClipContextMenu,
 }: TrackLaneProps) {
   return (
@@ -626,6 +767,8 @@ function TrackLane({
             key={`${tone}-${clip.range.editedStart}`}
             clip={clip}
             editedDuration={editedDuration}
+            editedDurationRef={editedDurationRef}
+            limits={clipLimits[i] ?? { leftLimit: 0, rightLimit: clip.range.sourceEnd }}
             isSelected={clip.wordIds.some((id) => selectedWordIds.has(id))}
             tone={tone}
             isFirst={i === 0}
@@ -644,6 +787,8 @@ function TrackLane({
 interface ClipBlockProps {
   clip: Clip;
   editedDuration: number;
+  editedDurationRef: React.RefObject<number>;
+  limits: ClipLimits;
   isSelected: boolean;
   tone: "video" | "audio";
   isFirst: boolean;
@@ -652,7 +797,7 @@ interface ClipBlockProps {
 }
 
 function ClipBlock({
-  clip, editedDuration, isSelected, tone, isFirst, onClick, onContextMenu,
+  clip, editedDuration, editedDurationRef, limits, isSelected, tone, isFirst, onClick, onContextMenu,
 }: ClipBlockProps) {
   const styleClasses =
     tone === "video"
@@ -663,8 +808,105 @@ function ClipBlock({
     : "";
   const seam = isFirst ? "" : " border-l border-zinc-950/70";
 
+  const clipRef = useRef<HTMLDivElement | null>(null);
+
+  // Edge trim drag — extends/shrinks the clip's source-time bounds.
+  // To restore content fully (CapCut-style "pull the clip out of its trim"),
+  // we both un-mark word-level deletions AND un-cut any AI segments
+  // (silence / repetition) that overlap the dragged range. Without the
+  // segment step, restored words appear orphaned with gaps between them.
+  //
+  // pxPerSec is recomputed on every pointermove from the lane's current
+  // width and the live editedDuration — both of which change as the clip
+  // grows during the drag.
+  const handleEdgePointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") => {
+      if (e.button !== 0) return;
+      e.stopPropagation();
+      e.preventDefault();
+      const clipEl = clipRef.current;
+      const laneEl = clipEl?.parentElement as HTMLElement | null;
+      if (!clipEl || !laneEl) return;
+
+      const startX = e.clientX;
+      const initSrc = side === "right" ? clip.range.sourceEnd : clip.range.sourceStart;
+      const baselineDeleted = new Set(useEditorStore.getState().deletedWordIds);
+      const baselineSegments = useEditorStore.getState().segments;
+      const transcriptSnap = useEditorStore.getState().transcript;
+      const clipMinSrc = clip.range.sourceStart;
+      const clipMaxSrc = clip.range.sourceEnd;
+
+      // One history entry per drag (not per pointermove). Pushed before the
+      // first mutation so undo restores the pre-drag state.
+      useEditorStore.getState().pushHistory();
+
+      const onMove = (ev: PointerEvent) => {
+        const laneWidth = laneEl.getBoundingClientRect().width;
+        const ed = editedDurationRef.current || editedDuration;
+        if (laneWidth <= 0 || ed <= 0) return;
+        const pxPerSec = laneWidth / ed;
+        const dSec = (ev.clientX - startX) / pxPerSec;
+        let target = initSrc + dSec;
+        if (side === "right") {
+          target = target > initSrc
+            ? Math.min(target, limits.rightLimit)
+            : Math.max(target, clipMinSrc);
+        } else {
+          target = target < initSrc
+            ? Math.max(target, limits.leftLimit)
+            : Math.min(target, clipMaxSrc);
+        }
+
+        // The source-time interval covered by this drag. `restoring` true
+        // means the user dragged outward into the dead zone; false means
+        // they pulled the edge inward to cut more.
+        const lo = Math.min(initSrc, target);
+        const hi = Math.max(initSrc, target);
+        const restoring = side === "right" ? target > initSrc : target < initSrc;
+
+        const nextDeleted = new Set(baselineDeleted);
+        for (const w of transcriptSnap) {
+          // Words whose timestamps fall inside the dragged range.
+          if (w.start >= lo && w.end <= hi) {
+            if (restoring) nextDeleted.delete(w.id);
+            else nextDeleted.add(w.id);
+          }
+        }
+
+        // Only restoring touches AI segment cuts. Shrinking just re-adds
+        // word IDs; the segments stay as they were.
+        let nextSegments = baselineSegments;
+        if (restoring) {
+          let mutated = false;
+          const updated = baselineSegments.map((s) => {
+            if (!s.isCut) return s;
+            if (s.endS > lo && s.startS < hi) {
+              mutated = true;
+              return { ...s, isCut: false };
+            }
+            return s;
+          });
+          if (mutated) nextSegments = updated;
+        }
+
+        useEditorStore.setState({ deletedWordIds: nextDeleted, segments: nextSegments });
+      };
+
+      const onUp = () => {
+        window.removeEventListener("pointermove", onMove);
+        window.removeEventListener("pointerup", onUp);
+        window.removeEventListener("pointercancel", onUp);
+      };
+      window.addEventListener("pointermove", onMove);
+      window.addEventListener("pointerup", onUp);
+      window.addEventListener("pointercancel", onUp);
+    },
+    [clip, editedDuration, editedDurationRef, limits],
+  );
+
   return (
     <div
+      ref={clipRef}
       className={`absolute top-1.5 bottom-1.5 cursor-grab active:cursor-grabbing rounded-[2px] transition-colors duration-75 ${styleClasses}${selectedRing}${seam}`}
       style={{
         left: `${(clip.range.editedStart / editedDuration) * 100}%`,
@@ -674,10 +916,19 @@ function ClipBlock({
       onClick={(e) => onClick(e, clip)}
       onContextMenu={(e) => onContextMenu(e, clip)}
     >
-      {/* Trim affordance — 4px hot zones at each edge show a resize cursor.
-          Trimming itself isn't wired up yet; this is the visual hint only. */}
-      <div className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize" />
-      <div className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize" />
+      {/* Edge trim hot zones — 4px wide. Pointerdown enters a drag that
+          restores (outward) or removes (inward) words by mutating
+          deletedWordIds in real time. */}
+      <div
+        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-20"
+        onPointerDown={(e) => handleEdgePointerDown(e, "left")}
+        onClick={(e) => e.stopPropagation()}
+      />
+      <div
+        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize z-20"
+        onPointerDown={(e) => handleEdgePointerDown(e, "right")}
+        onClick={(e) => e.stopPropagation()}
+      />
     </div>
   );
 }

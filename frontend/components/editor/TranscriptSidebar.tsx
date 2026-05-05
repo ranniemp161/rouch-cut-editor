@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, type MouseEvent } from "react";
 import { RotateCcw, Scissors, RotateCw } from "lucide-react";
 import { useEditorStore } from "@/store/useEditorStore";
 import { useContextMenu } from "@/hooks/useContextMenu";
@@ -19,11 +19,13 @@ export function TranscriptSidebar() {
   const deletedWordIds = useEditorStore((s) => s.deletedWordIds);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const lastClickedIndex = useEditorStore((s) => s.lastClickedIndex);
+  const currentTime = useEditorStore((s) => s.currentTime);
   const setSeekTime = useEditorStore((s) => s.setSeekTime);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setLastClickedIndex = useEditorStore((s) => s.setLastClickedIndex);
   const bulkToggleWords = useEditorStore((s) => s.bulkToggleWords);
   const resetDeletedWords = useEditorStore((s) => s.resetDeletedWords);
+  const pushHistory = useEditorStore((s) => s.pushHistory);
 
   const menu = useContextMenu();
 
@@ -36,7 +38,50 @@ export function TranscriptSidebar() {
   }, [transcript]);
 
   const paragraphs = useMemo(() => groupIntoParagraphs(transcript), [transcript]);
-  const deletedCount = deletedWordIds.size;
+
+  // Karaoke-style active word, found via a walking cursor instead of an
+  // O(n) scan on every timeupdate. Playback is monotonic 99% of the time, so
+  // the cursor advances by ~1 word per call. We walk in either direction to
+  // tolerate seeks.
+  const cursorRef = useRef(0);
+  const activeWordId = useMemo(() => {
+    if (transcript.length === 0) return null;
+    let i = Math.min(cursorRef.current, transcript.length - 1);
+    while (i < transcript.length - 1 && transcript[i].end < currentTime) i++;
+    while (i > 0 && transcript[i].start > currentTime) i--;
+    cursorRef.current = i;
+    const w = transcript[i];
+    if (w.word === "[SILENCE]") return null;
+    if (w.start <= currentTime && w.end >= currentTime) return w.id;
+    return null;
+  }, [transcript, currentTime]);
+
+  // Auto-scroll the sidebar so the active word stays in view as playback
+  // moves on. We hold a ref keyed by word id; the active word updates the ref
+  // and we scroll into view on change.
+  const activeWordRef = useRef<HTMLSpanElement | null>(null);
+  useEffect(() => {
+    if (!activeWordId) return;
+    const el = activeWordRef.current;
+    if (!el) return;
+    // Only scroll when the word is actually near the edge of (or outside)
+    // the scroll container — otherwise every word change triggers a smooth
+    // scroll animation and the sidebar jitters.
+    const container = el.closest(".overflow-y-auto") as HTMLElement | null;
+    if (!container) return;
+    const elRect = el.getBoundingClientRect();
+    const cRect = container.getBoundingClientRect();
+    const margin = 48;
+    if (elRect.top < cRect.top + margin || elRect.bottom > cRect.bottom - margin) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [activeWordId]);
+  // Exclude [SILENCE] markers from counts — they aren't real words.
+  const spokenCount = useMemo(() => transcript.filter((w) => w.word !== "[SILENCE]").length, [transcript]);
+  const deletedCount = useMemo(
+    () => transcript.filter((w) => w.word !== "[SILENCE]" && deletedWordIds.has(w.id)).length,
+    [transcript, deletedWordIds]
+  );
 
   const handleWordClick = (e: MouseEvent<HTMLSpanElement>, word: WordTimestamp) => {
     const index = indexById.get(word.id);
@@ -71,20 +116,28 @@ export function TranscriptSidebar() {
 
   const applyAndClose = (isDeleted: boolean) => {
     const ids = Array.from(selectedWordIds);
-    if (ids.length > 0) bulkToggleWords(ids, isDeleted);
+    if (ids.length > 0) {
+      pushHistory();
+      bulkToggleWords(ids, isDeleted);
+    }
     setSelectedWords(new Set());
     menu.close();
+  };
+
+  const handleReset = () => {
+    pushHistory();
+    resetDeletedWords();
   };
 
   return (
     <aside
       className="flex flex-col h-full border-l shrink-0"
-      style={{ width: 320, background: "#1a1a1a", borderColor: "#2a2a2a" }}
+      style={{ width: 280, background: "#1a1a1a", borderColor: "#2a2a2a" }}
     >
       <Header
-        total={transcript.length}
+        total={spokenCount}
         deleted={deletedCount}
-        onReset={resetDeletedWords}
+        onReset={handleReset}
       />
 
       <div className="flex-1 overflow-y-auto px-5 py-5">
@@ -96,22 +149,27 @@ export function TranscriptSidebar() {
               key={`p-${i}`}
               className="text-[13px] leading-[1.85] mb-5 last:mb-0"
             >
-              {paragraph.map((word) => (
-                <Word
-                  key={word.id}
-                  word={word}
-                  isDeleted={deletedWordIds.has(word.id)}
-                  isSelected={selectedWordIds.has(word.id)}
-                  onClick={(e) => handleWordClick(e, word)}
-                  onContextMenu={(e) => handleContextMenu(e, word)}
-                />
-              ))}
+              {paragraph.map((word) => {
+                const isActive = activeWordId === word.id;
+                return (
+                  <Word
+                    key={word.id}
+                    word={word}
+                    isDeleted={deletedWordIds.has(word.id)}
+                    isSelected={selectedWordIds.has(word.id)}
+                    isActive={isActive}
+                    refCb={isActive ? (el) => { activeWordRef.current = el; } : undefined}
+                    onClick={(e) => handleWordClick(e, word)}
+                    onContextMenu={(e) => handleContextMenu(e, word)}
+                  />
+                );
+              })}
             </p>
           ))
         )}
       </div>
 
-      {deletedCount > 0 && <Footer total={transcript.length} deleted={deletedCount} />}
+      {deletedCount > 0 && <Footer total={spokenCount} deleted={deletedCount} />}
 
       {menu.isOpen && (
         <div
@@ -149,26 +207,31 @@ interface WordProps {
   word: WordTimestamp;
   isDeleted: boolean;
   isSelected: boolean;
+  isActive: boolean;
+  refCb?: (el: HTMLSpanElement | null) => void;
   onClick: (e: MouseEvent<HTMLSpanElement>) => void;
   onContextMenu: (e: MouseEvent<HTMLSpanElement>) => void;
 }
 
-function Word({ word, isDeleted, isSelected, onClick, onContextMenu }: WordProps) {
+function Word({ word, isDeleted, isSelected, isActive, refCb, onClick, onContextMenu }: WordProps) {
   const base =
     "inline-block px-1 py-0.5 mr-1 rounded cursor-pointer select-none transition-colors duration-100";
 
-  // Selection wins on the background; deletion still applies its strikethrough
-  // on top so a selected-and-deleted word reads correctly.
+  // Active (karaoke) wins visually over hover/normal but yields to selection
+  // so the user's manual selection is never visually masked.
   const selectionClasses = isSelected
     ? "bg-purple-600/40 text-purple-100"
-    : isDeleted
-      ? "opacity-40 line-through text-red-400/70"
-      : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
+    : isActive
+      ? "bg-purple-600/50 text-white shadow-sm"
+      : isDeleted
+        ? "opacity-40 line-through text-red-400/70"
+        : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
 
   const deletedOverlay = isSelected && isDeleted ? " line-through opacity-70" : "";
 
   return (
     <span
+      ref={refCb}
       className={`${base} ${selectionClasses}${deletedOverlay}`}
       onClick={onClick}
       onContextMenu={onContextMenu}
@@ -241,10 +304,12 @@ function Footer({ total, deleted }: { total: number; deleted: number }) {
 // ---------------------------------------------------------------------------
 
 function groupIntoParagraphs(words: WordTimestamp[]): WordTimestamp[][] {
+  // Strip [SILENCE] tokens — they're an internal marker, not readable text.
+  const spoken = words.filter((w) => w.word !== "[SILENCE]");
   const groups: WordTimestamp[][] = [];
   let current: WordTimestamp[] = [];
 
-  for (const w of words) {
+  for (const w of spoken) {
     current.push(w);
     if (/[.!?]["')\]]?$/.test(w.word)) {
       groups.push(current);

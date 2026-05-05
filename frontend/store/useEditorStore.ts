@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { WordItem, AnalysisSegment } from "@/lib/api";
 import type { WordTimestamp } from "@/types";
+import { loadEdits } from "@/lib/editsStorage";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,6 +21,18 @@ export interface TranscriptSegment {
   reason: "silence" | "repetition" | "keep";
   isCut: boolean;
 }
+
+/**
+ * Snapshot of just the user-editable fields. Selection / playhead / history
+ * itself stay out — undo should not move the cursor or wipe what's selected.
+ */
+interface EditSnapshot {
+  deletedWordIds: Set<string>;
+  segments: TranscriptSegment[];
+  splitMarkers: number[];
+}
+
+const HISTORY_LIMIT = 50;
 
 interface EditorStore {
   // ── Auth ──────────────────────────────────────────────────────────────────
@@ -59,6 +72,10 @@ interface EditorStore {
   currentTime: number;
   splitMarkers: number[];
 
+  // ── Undo / redo (snapshot-based) ──────────────────────────────────────────
+  historyStack: EditSnapshot[];
+  futureStack: EditSnapshot[];
+
   // ── Actions ───────────────────────────────────────────────────────────────
   login: (secret: string) => void;
   logout: () => void;
@@ -70,6 +87,7 @@ interface EditorStore {
   toggleSegment: (startS: number) => void;
   setSilenceThreshold: (t: number) => void;
   clearMedia: () => void;
+  resetProjectScope: () => void;
 
   // Word-level actions
   setTranscript: (words: WordTimestamp[]) => void;
@@ -85,6 +103,12 @@ interface EditorStore {
   addSplitMarker: (time: number) => void;
   removeSplitMarker: (time: number) => void;
   clearSplitMarkers: () => void;
+
+  // History
+  pushHistory: () => void;
+  undo: () => void;
+  redo: () => void;
+  clearHistory: () => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +153,9 @@ export const useEditorStore = create<EditorStore>((set) => ({
   currentTime: 0,
   splitMarkers: [],
 
+  historyStack: [],
+  futureStack: [],
+
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   login: (secret) => {
@@ -159,6 +186,8 @@ export const useEditorStore = create<EditorStore>((set) => ({
       seekTime: null,
       currentTime: 0,
       splitMarkers: [],
+      historyStack: [],
+      futureStack: [],
     });
   },
 
@@ -191,20 +220,42 @@ export const useEditorStore = create<EditorStore>((set) => ({
       end: w.end,
     }));
 
-    // Seed the deletion set with whatever the backend flagged (AI semantic cuts
-    // plus math-based silence gaps) so those appear struck-through immediately.
-    // The user can still toggle any of them back on with a click.
-    const deletedWordIds = new Set<string>(meta.initialDeletedIds);
+    // Seed deletions with the backend's analysis (semantic + silence cuts).
+    let deletedWordIds = new Set<string>(meta.initialDeletedIds);
+    let finalSegments = segments;
+    let finalSplitMarkers: number[] = [];
+
+    // Restore the user's prior session for this transcript if one exists.
+    // Keyed by transcriptId so each project has its own saved edit state.
+    const tId = useEditorStore.getState().transcriptId;
+    if (tId) {
+      const saved = loadEdits(tId);
+      if (saved) {
+        deletedWordIds = saved.deletedWordIds;
+        // Merge saved segment cut-state by (startS,endS) so newly analysed
+        // segments stay in their post-AI default if the saved set is partial.
+        const byKey = new Map<string, TranscriptSegment>();
+        for (const s of saved.segments) byKey.set(`${s.startS}_${s.endS}`, s);
+        finalSegments = segments.map((s) => {
+          const found = byKey.get(`${s.startS}_${s.endS}`);
+          return found ? { ...s, isCut: found.isCut } : s;
+        });
+        finalSplitMarkers = saved.splitMarkers;
+      }
+    }
 
     set({
       analysisWords: words,
-      segments,
+      segments: finalSegments,
       transcript,
       deletedWordIds,
+      splitMarkers: finalSplitMarkers,
       frameRate: meta.frameRate,
       totalFrames: meta.totalFrames,
       durationSeconds: meta.durationSeconds,
       pipelineStage: "ready",
+      historyStack: [],
+      futureStack: [],
     });
   },
 
@@ -236,6 +287,32 @@ export const useEditorStore = create<EditorStore>((set) => ({
       seekTime: null,
       currentTime: 0,
       splitMarkers: [],
+      historyStack: [],
+      futureStack: [],
+    }),
+
+  resetProjectScope: () =>
+    set({
+      projectId: null,
+      mediaFile: null,
+      mediaId: null,
+      transcriptId: null,
+      pipelineStage: "idle",
+      uploadProgress: 0,
+      pipelineError: null,
+      analysisWords: [],
+      segments: [],
+      totalFrames: 0,
+      durationSeconds: 0,
+      transcript: [],
+      deletedWordIds: new Set<string>(),
+      selectedWordIds: new Set<string>(),
+      lastClickedIndex: null,
+      seekTime: null,
+      currentTime: 0,
+      splitMarkers: [],
+      historyStack: [],
+      futureStack: [],
     }),
 
   // ── Word-level (Descript-style) ──────────────────────────────────────────
@@ -293,6 +370,62 @@ export const useEditorStore = create<EditorStore>((set) => ({
     })),
 
   clearSplitMarkers: () => set({ splitMarkers: [] }),
+
+  // ── History ───────────────────────────────────────────────────────────────
+  // Snapshot the three editable fields. Callers invoke pushHistory() *before*
+  // the mutation, so an undo can restore exactly the prior state.
+
+  pushHistory: () =>
+    set((s) => {
+      const snap: EditSnapshot = {
+        deletedWordIds: new Set(s.deletedWordIds),
+        segments: s.segments.map((seg) => ({ ...seg })),
+        splitMarkers: [...s.splitMarkers],
+      };
+      const next = [...s.historyStack, snap];
+      // Bound memory — drop the oldest entry once the cap is hit. 50 is
+      // plenty for an editing session and avoids unbounded growth.
+      if (next.length > HISTORY_LIMIT) next.shift();
+      return { historyStack: next, futureStack: [] };
+    }),
+
+  undo: () =>
+    set((s) => {
+      if (s.historyStack.length === 0) return s;
+      const prev = s.historyStack[s.historyStack.length - 1];
+      const current: EditSnapshot = {
+        deletedWordIds: new Set(s.deletedWordIds),
+        segments: s.segments.map((seg) => ({ ...seg })),
+        splitMarkers: [...s.splitMarkers],
+      };
+      return {
+        historyStack: s.historyStack.slice(0, -1),
+        futureStack: [...s.futureStack, current],
+        deletedWordIds: prev.deletedWordIds,
+        segments: prev.segments,
+        splitMarkers: prev.splitMarkers,
+      };
+    }),
+
+  redo: () =>
+    set((s) => {
+      if (s.futureStack.length === 0) return s;
+      const next = s.futureStack[s.futureStack.length - 1];
+      const current: EditSnapshot = {
+        deletedWordIds: new Set(s.deletedWordIds),
+        segments: s.segments.map((seg) => ({ ...seg })),
+        splitMarkers: [...s.splitMarkers],
+      };
+      return {
+        futureStack: s.futureStack.slice(0, -1),
+        historyStack: [...s.historyStack, current],
+        deletedWordIds: next.deletedWordIds,
+        segments: next.segments,
+        splitMarkers: next.splitMarkers,
+      };
+    }),
+
+  clearHistory: () => set({ historyStack: [], futureStack: [] }),
 }));
 
 export const rehydrateAuth = () => {

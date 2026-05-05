@@ -32,40 +32,41 @@ async def upload_media(
             detail="Uploaded file must have a filename",
         )
 
-    # 1. ffprobe + Whisper
+    # 1. ffprobe + Whisper + audio-level silence detection
     transcript_data = await media_service.process_video(file)
     raw_words: list[dict] = transcript_data["word_level_data"]
-    silence_threshold = transcript_data.get("silence_threshold_used", 0.5)
-    silence_pad = 0.15
+    silences: list[tuple[float, float]] = transcript_data.get("silences") or []
+    silence_pad = 0.05  # tiny breathing room so we don't clip the first phoneme
 
-    words = []
-    spoken_words = []
     word_id_counter = 1
-
-    # 2. Stamp each word with a stable string ID and insert [SILENCE] words.
-    for i, w in enumerate(raw_words):
+    spoken_words: list[dict] = []
+    for w in raw_words:
         w["id"] = str(word_id_counter)
         word_id_counter += 1
-        words.append(w)
         spoken_words.append(w)
-        
-        if i < len(raw_words) - 1:
-            next_w = raw_words[i+1]
-            gap_start = w["end"]
-            gap_end = next_w["start"]
-            if gap_end - gap_start > silence_threshold:
-                padded_start = round(gap_start + silence_pad, 3)
-                padded_end = round(gap_end - silence_pad, 3)
-                if padded_end > padded_start:
-                    words.append({
-                        "id": f"sil-{word_id_counter}",
-                        "word": "[SILENCE]",
-                        "start": padded_start,
-                        "end": padded_end,
-                        "probability": 1.0,
-                        "is_silence": True
-                    })
-                    word_id_counter += 1
+
+    # 2. Interleave [SILENCE] markers using the silences detected from the
+    #    audio waveform.  These represent real silent regions, not just
+    #    inter-word arithmetic gaps that Whisper's loose word boundaries
+    #    routinely under-report.
+    silence_words: list[dict] = []
+    for s_start, s_end in silences:
+        padded_start = round(s_start + silence_pad, 3)
+        padded_end = round(s_end - silence_pad, 3)
+        if padded_end <= padded_start:
+            continue
+        silence_words.append({
+            "id": f"sil-{word_id_counter}",
+            "word": "[SILENCE]",
+            "start": padded_start,
+            "end": padded_end,
+            "probability": 1.0,
+            "is_silence": True,
+        })
+        word_id_counter += 1
+
+    # Merge spoken + silence in time order so the transcript reads sequentially.
+    words = sorted(spoken_words + silence_words, key=lambda w: w["start"])
 
     # 3. Semantic cut suggestions from Gemini (best-effort; non-fatal).
     #    Run in a thread-pool so the blocking SDK call doesn't stall the event loop.
@@ -84,6 +85,7 @@ async def upload_media(
         frame_rate=transcript_data["frame_rate"],
         total_frames=transcript_data["total_frames"],
         duration_seconds=transcript_data["duration_seconds"],
+        file_path=transcript_data.get("file_path"),
     )
     session.add(asset)
     session.flush()

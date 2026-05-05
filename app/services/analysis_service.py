@@ -42,7 +42,10 @@ def analyze_transcript(
 
 def _find_silence_cuts(words: list[dict], threshold: float) -> list[dict]:
     cuts = []
-    for prev, curr in zip(words, words[1:]):
+    # Exclude [SILENCE] marker words — they sit inside the gap and would split
+    # it into two sub-threshold halves, preventing gap detection entirely.
+    spoken = [w for w in words if not w.get("is_silence")]
+    for prev, curr in zip(spoken, spoken[1:]):
         gap_start = prev["end"]
         gap_end = curr["start"]
         if gap_end - gap_start >= threshold:
@@ -56,6 +59,9 @@ def _find_repetition_cuts(words: list[dict], min_n: int = 2, max_n: int = 6) -> 
     Marks the *first* occurrence as the cut (assumed to be the stumble/false start).
     """
     reps = []
+    # Exclude silence markers — they carry no spoken content and would corrupt
+    # n-gram matching across pause boundaries.
+    words = [w for w in words if not w.get("is_silence")]
     i = 0
     while i < len(words):
         matched = False
@@ -102,8 +108,11 @@ def _build_segment_list(words: list[dict], cuts: list[dict]) -> list[dict]:
     Interleave keep and cut segments covering [first_word_start, last_word_end].
     """
     segments: list[dict] = []
-    cursor = words[0]["start"]
-    clip_end = words[-1]["end"]
+    spoken = [w for w in words if not w.get("is_silence")]
+    if not spoken:
+        return []
+    cursor = spoken[0]["start"]
+    clip_end = spoken[-1]["end"]
 
     for cut in cuts:
         if cut["start_s"] > cursor:

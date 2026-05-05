@@ -38,7 +38,7 @@ export function MediaBin({ onFileSelect, onDelete }: Props) {
   return (
     <aside
       className="flex flex-col h-full border-r shrink-0"
-      style={{ width: 220, background: "#1a1a1a", borderColor: "#2a2a2a" }}
+      style={{ width: 180, background: "#1a1a1a", borderColor: "#2a2a2a" }}
     >
       {/* Header */}
       <div

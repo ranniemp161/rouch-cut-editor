@@ -12,6 +12,10 @@ Algorithm:
     5. Render segments as <clipitem> blocks (XML) or event lines (EDL).
 """
 
+import os
+import subprocess
+import tempfile
+import uuid
 from typing import TYPE_CHECKING
 
 from app.services.transcription import find_silence_gaps
@@ -194,6 +198,59 @@ def _render_edl(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:
         )
 
     return "\n".join(lines)
+
+
+def render_to_file(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:
+    """
+    Execute FFMPEG to concatenate the kept segments and write an MP4.
+
+    Returns the path to the rendered file (caller is responsible for cleanup).
+    Raises subprocess.CalledProcessError if ffmpeg fails.
+    """
+    fps = asset.frame_rate
+    out_path = os.path.join(tempfile.gettempdir(), f"roughcut_{uuid.uuid4().hex}.mp4")
+
+    if not segments:
+        raise ValueError("No segments to render")
+
+    filter_parts: list[str] = []
+    for i, (in_f, out_f) in enumerate(segments):
+        start = in_f / fps
+        end = out_f / fps
+        filter_parts.append(
+            f"[0:v]trim=start={start:.3f}:end={end:.3f},setpts=PTS-STARTPTS[v{i}]"
+        )
+        filter_parts.append(
+            f"[0:a]atrim=start={start:.3f}:end={end:.3f},asetpts=PTS-STARTPTS[a{i}]"
+        )
+
+    n = len(segments)
+    if n == 1:
+        filter_parts.append("[v0]copy[vout]")
+        filter_parts.append("[a0]acopy[aout]")
+    else:
+        v_labels = "".join(f"[v{i}]" for i in range(n))
+        a_labels = "".join(f"[a{i}]" for i in range(n))
+        filter_parts.append(f"{v_labels}concat=n={n}:v=1:a=0[vout]")
+        filter_parts.append(f"{a_labels}concat=n={n}:v=0:a=1[aout]")
+
+    filter_complex = ";".join(filter_parts)
+
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-i", asset.file_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-map", "[aout]",
+            "-c:v", "libx264", "-preset", "fast", "-crf", "22",
+            "-c:a", "aac", "-b:a", "192k",
+            out_path,
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return out_path
 
 
 def _render_ffmpeg_script(asset: "MediaAsset", segments: list[tuple[int, int]]) -> str:

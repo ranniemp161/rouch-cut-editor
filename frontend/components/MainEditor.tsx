@@ -1,8 +1,9 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { useDropzone } from "react-dropzone";
 import { useEditorStore } from "@/store/useEditorStore";
+import { saveEdits } from "@/lib/editsStorage";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { usePipeline } from "@/hooks/usePipeline";
 
@@ -18,13 +19,10 @@ import { PipelineOverlay } from "./editor/PipelineOverlay";
 
 export default function MainEditor() {
   const selectFile = useEditorStore((s) => s.selectFile);
-  const toggleSegment = useEditorStore((s) => s.toggleSegment);
   const mediaFile = useEditorStore((s) => s.mediaFile);
   const pipelineStage = useEditorStore((s) => s.pipelineStage);
   const uploadProgress = useEditorStore((s) => s.uploadProgress);
   const segments = useEditorStore((s) => s.segments);
-  const analysisWords = useEditorStore((s) => s.analysisWords);
-  const silenceThreshold = useEditorStore((s) => s.silenceThreshold);
   const frameRate = useEditorStore((s) => s.frameRate);
   const durationSeconds = useEditorStore((s) => s.durationSeconds);
 
@@ -43,8 +41,65 @@ export default function MainEditor() {
     onDrop,
     accept: { "video/*": [".mp4", ".mov", ".mxf", ".avi", ".mkv"] },
     noClick: true,
+    noKeyboard: true,
     multiple: false,
   });
+
+  // Global Spacebar → play/pause. Ignored when typing into a field. Without
+  // this, the focused dropzone input would consume Space and pop the OS
+  // file picker (browser-native behavior on focused <input type="file">).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.code !== "Space" && e.key !== " ") return;
+      const t = e.target as HTMLElement | null;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      player.togglePlay();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [player]);
+
+  // Autosave the user's edits (deletions + AI segment cut-state + splits) to
+  // localStorage on every change, debounced via rAF so a long drag doesn't
+  // flood storage. Keyed by transcriptId so projects don't bleed into each
+  // other. The store re-hydrates from this on next setAnalysis.
+  useEffect(() => {
+    let raf = 0;
+    let lastDel: Set<string> | null = null;
+    let lastSegs: unknown = null;
+    let lastSplits: unknown = null;
+
+    const unsubscribe = useEditorStore.subscribe((state) => {
+      const tid = state.transcriptId;
+      if (!tid) return;
+      // Skip when nothing user-editable changed (cheap reference checks —
+      // the store always replaces these by reference on edit).
+      if (
+        state.deletedWordIds === lastDel &&
+        state.segments === lastSegs &&
+        state.splitMarkers === lastSplits
+      ) return;
+      lastDel = state.deletedWordIds;
+      lastSegs = state.segments;
+      lastSplits = state.splitMarkers;
+
+      if (raf) cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => {
+        saveEdits(tid, {
+          deletedWordIds: state.deletedWordIds,
+          segments: state.segments,
+          splitMarkers: state.splitMarkers,
+        });
+      });
+    });
+
+    return () => {
+      if (raf) cancelAnimationFrame(raf);
+      unsubscribe();
+    };
+  }, []);
 
   const fps = frameRate || 23.976;
   const activeDuration = player.duration || durationSeconds;
@@ -69,7 +124,13 @@ export default function MainEditor() {
         />
       )}
 
-      <TopBar onExport={pipeline.exportFile} isExporting={pipeline.isExporting} onDeleteAll={pipeline.deleteAll} />
+      <TopBar
+        onExport={pipeline.exportFile}
+        isExporting={pipeline.isExporting}
+        onDeleteAll={pipeline.deleteAll}
+        onRenderMp4={pipeline.renderMp4}
+        isRendering={pipeline.isRendering}
+      />
 
       <div className="flex flex-1 overflow-hidden min-h-0">
         <MediaBin onFileSelect={selectFile} onDelete={pipeline.deleteCurrent} />
@@ -110,12 +171,9 @@ export default function MainEditor() {
         onCut={pipeline.runPipeline}
       />
 
-      <Timeline
-        mediaFile={mediaFile}
-        currentTime={player.currentTime}
-        duration={activeDuration}
-        segments={segments}
-      />
+      <div className="px-6 pb-6 bg-[#111111]">
+        <Timeline />
+      </div>
     </div>
   );
 }

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import {
   analyzeMedia, bootstrapUser, createProject, deleteMedia,
-  downloadFile, generateExport, uploadMedia,
+  downloadBlob, downloadFile, generateExport, renderRoughCut, uploadMedia,
   type ExportFormat,
 } from "@/lib/api";
 import { useEditorStore } from "@/store/useEditorStore";
@@ -16,6 +16,7 @@ import { useEditorStore } from "@/store/useEditorStore";
 export function usePipeline(onBeforeDelete?: () => void) {
   const store = useEditorStore();
   const [isExporting, setIsExporting] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
 
   // ── Upload + analyse ──────────────────────────────────────────────────────
 
@@ -61,6 +62,11 @@ export function usePipeline(onBeforeDelete?: () => void) {
         durationSeconds: result.duration_seconds,
         initialDeletedIds: result.initial_deleted_ids,
       });
+      // Belt-and-suspenders: explicitly hydrate the deletion set so the
+      // backend-flagged silences + Gemini repetitions appear cut on first paint.
+      useEditorStore.setState({
+        deletedWordIds: new Set(result.initial_deleted_ids ?? []),
+      });
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Pipeline failed";
       store.setPipelineStage("error", msg);
@@ -81,6 +87,9 @@ export function usePipeline(onBeforeDelete?: () => void) {
           totalFrames: result.total_frames,
           durationSeconds: result.duration_seconds,
           initialDeletedIds: result.initial_deleted_ids,
+        });
+        useEditorStore.setState({
+          deletedWordIds: new Set(result.initial_deleted_ids ?? []),
         });
       } catch {
         /* keep existing segments on transient failure */
@@ -142,11 +151,28 @@ export function usePipeline(onBeforeDelete?: () => void) {
     try {
       const { deleteAllProjects } = await import("@/lib/api");
       await deleteAllProjects();
-      store.clearMedia();
+      store.resetProjectScope();
     } catch (err) {
       console.error("Delete all failed:", err);
     }
   }, [store]);
 
-  return { runPipeline, reanalyze, exportFile, deleteCurrent, deleteAll, isExporting };
+  // ── Render rough-cut MP4 on the server ───────────────────────────────────
+
+  const renderMp4 = useCallback(async () => {
+    const { mediaId, silenceThreshold } = useEditorStore.getState();
+    if (!mediaId || isRendering) return;
+    setIsRendering(true);
+    try {
+      const deletedWordIds = Array.from(store.deletedWordIds);
+      const blob = await renderRoughCut(mediaId, silenceThreshold, 5, deletedWordIds);
+      downloadBlob(blob, "roughcut.mp4");
+    } catch (err) {
+      console.error("Render failed:", err);
+    } finally {
+      setIsRendering(false);
+    }
+  }, [isRendering, store]);
+
+  return { runPipeline, reanalyze, exportFile, renderMp4, deleteCurrent, deleteAll, isExporting, isRendering };
 }

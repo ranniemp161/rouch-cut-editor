@@ -1,6 +1,6 @@
 "use client";
 
-import { LogOut, Scissors, Trash2 } from "lucide-react";
+import { Film, LogOut, Loader2, Scissors, Trash2 } from "lucide-react";
 import type { ExportFormat } from "@/lib/api";
 import { useEditorStore } from "@/store/useEditorStore";
 import { ExportMenu } from "./ExportMenu";
@@ -9,9 +9,11 @@ interface Props {
   onExport: (format: ExportFormat) => void;
   isExporting: boolean;
   onDeleteAll: () => void;
+  onRenderMp4: () => void;
+  isRendering: boolean;
 }
 
-export function TopBar({ onExport, isExporting, onDeleteAll }: Props) {
+export function TopBar({ onExport, isExporting, onDeleteAll, onRenderMp4, isRendering }: Props) {
   const logout = useEditorStore((s) => s.logout);
   const mediaId = useEditorStore((s) => s.mediaId);
   const pipelineStage = useEditorStore((s) => s.pipelineStage);
@@ -38,16 +40,37 @@ export function TopBar({ onExport, isExporting, onDeleteAll }: Props) {
 
       <div className="flex-1" />
 
-      <button
-        onClick={onDeleteAll}
-        className="flex items-center gap-1.5 px-3 py-1 mr-2 rounded text-[11px] font-medium transition-colors bg-red-900/40 text-red-400 hover:bg-red-900/60 hover:text-red-300"
-        title="Clear all storage and projects"
-      >
-        <Trash2 size={11} />
-        Clear All Data
-      </button>
+      {/* Generate Rough Cut — the primary action once analysis is done */}
+      {canExport && (
+        <button
+          onClick={onRenderMp4}
+          disabled={isRendering}
+          className="flex items-center gap-1.5 px-3 py-1 rounded text-[11px] font-semibold transition-colors bg-violet-600 hover:bg-violet-500 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+          title="Render and download a cut MP4 from the server"
+        >
+          {isRendering ? (
+            <>
+              <Loader2 size={11} className="animate-spin" />
+              Rendering…
+            </>
+          ) : (
+            <>
+              <Film size={11} />
+              Generate Rough Cut
+            </>
+          )}
+        </button>
+      )}
 
       <ExportMenu onExport={onExport} disabled={!canExport} isExporting={isExporting} />
+
+      <button
+        onClick={onDeleteAll}
+        className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-medium transition-colors text-zinc-600 hover:text-red-400 hover:bg-red-900/20"
+        title="Clear all projects and data"
+      >
+        <Trash2 size={11} />
+      </button>
 
       <button
         onClick={logout}

@@ -1,6 +1,8 @@
+import os
 import uuid
 
-from fastapi import APIRouter, HTTPException, Response, status
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Response, status
+from fastapi.responses import FileResponse
 from sqlmodel import select
 
 from app.api.deps import SessionDep
@@ -51,6 +53,60 @@ def generate_export(request: ExportRequest, session: SessionDep) -> Response:
     content, media_type = export_service.generate(transcript, request, asset)
 
     return Response(content=content, media_type=media_type)
+
+
+@router.post("/render/{media_id}", status_code=status.HTTP_200_OK)
+def render_export(
+    media_id: uuid.UUID,
+    request: ExportRequest,
+    background_tasks: BackgroundTasks,
+    session: SessionDep,
+) -> FileResponse:
+    """
+    Render a rough-cut MP4 using FFMPEG on the server and stream it back.
+
+    The original video must have been uploaded via POST /media/upload (it is
+    retained on disk at asset.file_path).  Pass the same ``deleted_word_ids``
+    that the editor is showing so the cut points match the preview exactly.
+    """
+    asset = session.get(MediaAsset, media_id)
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Media asset not found")
+
+    if not asset.file_path or not os.path.exists(asset.file_path):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Original video not found on server. Please re-upload the file.",
+        )
+
+    transcript = session.exec(
+        select(Transcript)
+        .where(Transcript.media_asset_id == media_id)
+        .order_by(Transcript.created_at.desc())  # type: ignore[arg-type]
+    ).first()
+
+    if not transcript:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transcript not found")
+
+    word_data: list[dict] = transcript.word_level_data or []
+    segments = export_service._build_segments(word_data, request, asset.frame_rate, asset.total_frames)
+
+    if not segments:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="No segments to render after applying cuts",
+        )
+
+    out_path = export_service.render_to_file(asset, segments)
+    background_tasks.add_task(os.unlink, out_path)
+
+    stem = asset.original_filename.rsplit(".", 1)[0]
+    return FileResponse(
+        out_path,
+        media_type="video/mp4",
+        filename=f"roughcut_{stem}.mp4",
+        background=background_tasks,
+    )
 
 
 @router.get("/{export_id}", tags=["exports"])

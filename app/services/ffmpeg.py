@@ -7,6 +7,7 @@ integer arithmetic to avoid floating-point drift at high frame counts.
 """
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass
 from fractions import Fraction
@@ -64,6 +65,47 @@ def probe_media(file_path: str) -> MediaInfo:
         total_frames=total_frames,
         duration_seconds=duration_seconds,
     )
+
+
+def detect_silences(
+    audio_path: str,
+    min_duration: float = 0.4,
+    noise_db: float = -30.0,
+) -> list[tuple[float, float]]:
+    """
+    Detect silent regions in *audio_path* using FFmpeg's silencedetect filter.
+
+    Returns a list of (start_seconds, end_seconds) tuples for every region of
+    audio quieter than ``noise_db`` for at least ``min_duration`` seconds.
+
+    Audio-level detection catches real silences that Whisper's word-boundary
+    timestamps miss (Whisper often absorbs trailing pauses into the previous
+    word's ``end`` time, hiding the gap from inter-word arithmetic).
+    """
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats",
+            "-i", audio_path,
+            "-af", f"silencedetect=noise={noise_db}dB:d={min_duration}",
+            "-f", "null", "-",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # silencedetect writes its findings to stderr regardless of exit code.
+    log = proc.stderr or ""
+    starts = [float(m) for m in re.findall(r"silence_start:\s*([\d.]+)", log)]
+    ends = [float(m) for m in re.findall(r"silence_end:\s*([\d.]+)", log)]
+
+    # If the audio ends mid-silence ffmpeg may emit silence_start without a
+    # matching silence_end; pair them positionally and drop the orphan.
+    pairs: list[tuple[float, float]] = []
+    for s, e in zip(starts, ends):
+        if e > s:
+            pairs.append((round(s, 3), round(e, 3)))
+    return pairs
 
 
 def extract_audio(video_path: str, audio_path: str) -> None:

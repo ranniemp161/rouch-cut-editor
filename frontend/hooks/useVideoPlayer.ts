@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorStore, type TranscriptSegment } from "@/store/useEditorStore";
-import { buildEditMap } from "@/lib/editMap";
-
+import { buildEditMap, sourceToEdited, editedToSource } from "@/lib/editMap";
 /**
  * Encapsulates HTMLVideoElement state and provides cut-aware playback.
  *
@@ -12,8 +11,8 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   const videoRef = useRef<HTMLVideoElement>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(0);
+  const [sourceTime, setSourceTime] = useState(0);
+  const [sourceDuration, setSourceDuration] = useState(0);
   const [volume, setVolume] = useState(1);
 
   const seekTime = useEditorStore((s) => s.seekTime);
@@ -25,8 +24,8 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   // Single source of truth for cut-skipping: the same edit map the timeline
   // uses to render the ripple view. Re-derived whenever deletions change.
   const editMap = useMemo(
-    () => buildEditMap(transcript, deletedWordIds, segments, duration),
-    [transcript, deletedWordIds, segments, duration],
+    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration),
+    [transcript, deletedWordIds, segments, sourceDuration],
   );
   const deletedRuns = editMap.deletedRegions;
 
@@ -34,8 +33,8 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   useEffect(() => {
     if (!mediaFile) {
       setVideoUrl(null);
-      setDuration(0);
-      setCurrentTime(0);
+      setSourceDuration(0);
+      setSourceTime(0);
       return;
     }
     const url = URL.createObjectURL(mediaFile);
@@ -47,6 +46,15 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     if (videoRef.current) videoRef.current.volume = volume;
   }, [volume]);
 
+  const editMapRef = useRef(editMap);
+  useEffect(() => { editMapRef.current = editMap; }, [editMap]);
+
+  const editedDuration = editMap.editedDuration;
+  const editedTime = useMemo(
+    () => sourceToEdited(sourceTime, editMap) ?? 0,
+    [sourceTime, editMap]
+  );
+
   // Native `timeupdate` only fires ~4Hz, which lets up to 250ms of a deleted
   // word leak through before we can skip. We instead drive cut-skipping from
   // an rAF loop while the video is playing (see useEffect below). The native
@@ -54,7 +62,7 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   // pauses where the rAF loop isn't running.
   const handleTimeUpdate = useCallback(() => {
     const t = videoRef.current?.currentTime ?? 0;
-    setCurrentTime(t);
+    setSourceTime(t);
     setStoreCurrentTime(t);
   }, [setStoreCurrentTime]);
 
@@ -73,7 +81,7 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
         const t = v.currentTime;
         const deleted = deletedRunsRef.current.find((r) => t >= r.start && t < r.end);
         if (deleted) v.currentTime = deleted.end;
-        setCurrentTime(v.currentTime);
+        setSourceTime(v.currentTime);
         setStoreCurrentTime(v.currentTime);
       }
       raf = requestAnimationFrame(tick);
@@ -83,7 +91,7 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   }, [isPlaying, setStoreCurrentTime]);
 
   const handleLoadedMetadata = useCallback(() => {
-    setDuration(videoRef.current?.duration ?? 0);
+    setSourceDuration(videoRef.current?.duration ?? 0);
   }, []);
 
   const handleEnded = useCallback(() => setIsPlaying(false), []);
@@ -113,11 +121,12 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     setIsPlaying(false);
   }, []);
 
-  const seekTo = useCallback((t: number) => {
+  const seekToEdited = useCallback((et: number) => {
     if (!videoRef.current) return;
-    videoRef.current.currentTime = t;
-    setCurrentTime(t);
-    setStoreCurrentTime(t);
+    const st = editedToSource(et, editMapRef.current);
+    videoRef.current.currentTime = st;
+    setSourceTime(st);
+    setStoreCurrentTime(st);
   }, [setStoreCurrentTime]);
 
   // Drive playback from the store's seekTime: any caller that does
@@ -128,29 +137,29 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     if (seekTime === null) return;
     if (videoRef.current) {
       videoRef.current.currentTime = seekTime;
-      setCurrentTime(seekTime);
+      setSourceTime(seekTime);
       setStoreCurrentTime(seekTime);
     }
     setSeekTime(null);
   }, [seekTime, setSeekTime, setStoreCurrentTime]);
 
-  const skipBack = useCallback(() => seekTo(0), [seekTo]);
-  const skipForward = useCallback(() => seekTo(duration), [seekTo, duration]);
+  const skipBack = useCallback(() => seekToEdited(0), [seekToEdited]);
+  const skipForward = useCallback(() => seekToEdited(editedDuration), [seekToEdited, editedDuration]);
   const stepBack = useCallback(
-    (fps: number) => seekTo(Math.max(0, currentTime - 1 / fps)),
-    [seekTo, currentTime]
+    (fps: number) => seekToEdited(Math.max(0, editedTime - 1 / fps)),
+    [seekToEdited, editedTime]
   );
   const stepForward = useCallback(
-    (fps: number) => seekTo(Math.min(duration, currentTime + 1 / fps)),
-    [seekTo, currentTime, duration]
+    (fps: number) => seekToEdited(Math.min(editedDuration, editedTime + 1 / fps)),
+    [seekToEdited, editedTime, editedDuration]
   );
 
   return {
     videoRef,
     videoUrl,
     isPlaying,
-    currentTime,
-    duration,
+    currentTime: editedTime,
+    duration: editedDuration,
     volume,
     setVolume,
     handleTimeUpdate,
@@ -158,7 +167,7 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     handleEnded,
     togglePlay,
     pause,
-    seekTo,
+    seekTo: seekToEdited,
     skipBack,
     skipForward,
     stepBack,

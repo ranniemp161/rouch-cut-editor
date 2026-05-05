@@ -25,6 +25,7 @@ class MediaAsset(SQLModel, table=True):
     frame_rate: float = Field(nullable=False)
     total_frames: int = Field(nullable=False)
     duration_seconds: float = Field(nullable=False)
+    file_path: Optional[str] = Field(default=None, nullable=True)
     created_at: datetime = created_at_field()
 
     project: Optional["Project"] = Relationship(back_populates="media_assets")
