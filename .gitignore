@@ -58,7 +58,8 @@ frontend/.env.production.local
 *.swo
 .DS_Store
 Thumbs.db
-.claude
+.claude/
+alembic/
 
 #context
 context/
