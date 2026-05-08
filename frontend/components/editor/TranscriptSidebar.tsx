@@ -24,6 +24,7 @@ export function TranscriptSidebar() {
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setLastClickedIndex = useEditorStore((s) => s.setLastClickedIndex);
   const bulkToggleWords = useEditorStore((s) => s.bulkToggleWords);
+  const clearTrimsForIds = useEditorStore((s) => s.clearTrimsForIds);
   const resetDeletedWords = useEditorStore((s) => s.resetDeletedWords);
   const pushHistory = useEditorStore((s) => s.pushHistory);
 
@@ -119,6 +120,7 @@ export function TranscriptSidebar() {
     if (ids.length > 0) {
       pushHistory();
       bulkToggleWords(ids, isDeleted);
+      if (isDeleted) clearTrimsForIds(ids);
     }
     setSelectedWords(new Set());
     menu.close();

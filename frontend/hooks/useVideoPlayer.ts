@@ -7,7 +7,7 @@ import { buildEditMap, sourceToEdited, editedToSource, type EditMap } from "@/li
 // audio every time. 80ms of look-ahead lets the seek complete *before* the
 // audio decoder reaches the cut point. The cost is at most one frame of
 // kept audio chopped at the boundary — inaudible vs. hearing the cut word.
-const SKIP_LOOKAHEAD_S = 0.08;
+const SKIP_LOOKAHEAD_S = 0.12;
 
 // Snap a source-time into the nearest kept range. If the time lands inside
 // a deleted region, we jump to the start of the next kept range; if no
@@ -50,7 +50,6 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
     [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
   );
-  const deletedRuns = editMap.deletedRegions;
 
   // Object URL lifecycle — created on file change, revoked on cleanup.
   useEffect(() => {
@@ -89,10 +88,6 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     setStoreCurrentTime(t);
   }, [setStoreCurrentTime]);
 
-  // Ref so the rAF loop reads the latest cut data without restarting.
-  const deletedRunsRef = useRef(deletedRuns);
-  useEffect(() => { deletedRunsRef.current = deletedRuns; }, [deletedRuns]);
-
   // 60Hz cut-skip loop. Only runs while the video is actually playing —
   // when paused, the native `timeupdate` is enough.
   //
@@ -114,7 +109,7 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
       const v = videoRef.current;
       if (v && !v.paused && !v.ended) {
         const t = v.currentTime;
-        const runs = deletedRunsRef.current;
+        const runs = editMapRef.current.deletedRegions;
         // Walk forward to the first region whose end is still ahead of us.
         // Regions are pre-sorted so this is cheap; for thousands of cuts a
         // binary search would be warranted, but we don't get near that scale.

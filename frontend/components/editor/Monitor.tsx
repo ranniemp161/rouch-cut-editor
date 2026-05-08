@@ -60,8 +60,9 @@ export function Monitor({
             max={duration}
             step={0.01}
             value={currentTime}
+            disabled={duration <= 0}
             onChange={(e) => onSeek(Number(e.target.value))}
-            className="w-full h-1 accent-violet-500 cursor-pointer"
+            className="w-full h-1 accent-violet-500 cursor-pointer disabled:cursor-not-allowed disabled:opacity-40"
           />
         </div>
       )}

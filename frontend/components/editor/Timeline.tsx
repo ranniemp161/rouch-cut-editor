@@ -10,7 +10,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Scissors, RotateCw, Minus, Plus } from "lucide-react";
+import { Scissors, RotateCw, Minus, Plus, Magnet } from "lucide-react";
 import { useEditorStore } from "@/store/useEditorStore";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import {
@@ -19,6 +19,7 @@ import {
   sourceToEdited,
   type KeptRange,
 } from "@/lib/editMap";
+import { WaveformCanvas } from "./WaveformCanvas";
 
 type Lane = "V1" | "A1";
 
@@ -48,12 +49,22 @@ interface RangeSelection {
 interface Clip {
   range: KeptRange;
   wordIds: string[];
+  keptWordIds: string[];
   anchorIndex: number;
+  // Pre-joined transcript text and first/last word labels — computed once
+  // here so ClipBlock can render overlays and hover info without re-walking
+  // the transcript on every paint.
+  text: string;
+  firstWord: string;
+  lastWord: string;
 }
 
 export function Timeline() {
   const currentTime = useEditorStore((s) => s.currentTime);
   const sourceDuration = useEditorStore((s) => s.durationSeconds);
+  const mediaFile = useEditorStore((s) => s.mediaFile);
+  const magneticTimeline = useEditorStore((s) => s.magneticTimeline);
+  const setMagneticTimeline = useEditorStore((s) => s.setMagneticTimeline);
   const setSeekTime = useEditorStore((s) => s.setSeekTime);
   const transcript = useEditorStore((s) => s.transcript);
   const deletedWordIds = useEditorStore((s) => s.deletedWordIds);
@@ -65,6 +76,7 @@ export function Timeline() {
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
   const setLastClickedIndex = useEditorStore((s) => s.setLastClickedIndex);
   const bulkToggleWords = useEditorStore((s) => s.bulkToggleWords);
+  const clearTrimsForIds = useEditorStore((s) => s.clearTrimsForIds);
   const addSplitMarker = useEditorStore((s) => s.addSplitMarker);
   const pushHistory = useEditorStore((s) => s.pushHistory);
   const undo = useEditorStore((s) => s.undo);
@@ -178,18 +190,43 @@ export function Timeline() {
         // means Delete/Restore always has something to act on; the actual
         // visible state of each word is still driven by deletedWordIds in
         // the transcript sidebar and the player skip.
-        const ids: string[] = [];
+        const allIds: string[] = [];
+        const keptIds: string[] = [];
         let anchor = -1;
         let j = wi;
         while (j < transcript.length && transcript[j].start < subEnd) {
           const w = transcript[j];
           if (w.start >= subStart) {
-            ids.push(w.id);
-            if (anchor === -1) anchor = j;
+            allIds.push(w.id);
+            if (!deletedWordIds.has(w.id)) {
+              keptIds.push(w.id);
+              if (anchor === -1) anchor = j;
+            }
           }
           j++;
         }
-        out.push({ range: subRange, wordIds: ids, anchorIndex: anchor === -1 ? wi : anchor });
+        if (keptIds.length > 0) {
+          // Build the visible text from kept (non-deleted) words only, so
+          // the V1 overlay reads as the *edited* transcript not the raw one.
+          // Skip [SILENCE] markers — they're internal state, not text.
+          const keptSet = new Set(keptIds);
+          const keptWords: string[] = [];
+          for (let k = 0; k < transcript.length; k++) {
+            const w = transcript[k];
+            if (!keptSet.has(w.id)) continue;
+            if (w.word === "[SILENCE]") continue;
+            keptWords.push(w.word);
+          }
+          out.push({
+            range: subRange,
+            wordIds: allIds,
+            keptWordIds: keptIds,
+            anchorIndex: anchor === -1 ? wi : anchor,
+            text: keptWords.join(" "),
+            firstWord: keptWords[0] ?? "",
+            lastWord: keptWords[keptWords.length - 1] ?? "",
+          });
+        }
         // Advance wi past this sub-clip so the next sub starts after it.
         while (wi < transcript.length && transcript[wi].start < subEnd) wi++;
       }
@@ -314,28 +351,6 @@ export function Timeline() {
     },
     [menu, selectedWordIds, setLastClickedIndex, setSelectedWords],
   );
-
-  // Drop any clipTrim entries anchored to one of the given word IDs. Called
-  // on every deletion path. Without this, a Delete on a trim-extended
-  // phantom clip would toggle the words but leave the pad in place — the
-  // kept range would persist (extension still active) and the clip would
-  // continue to play, exactly the "deleted but still in timeline" bug.
-  const clearTrimsForIds = useCallback((ids: string[]) => {
-    if (ids.length === 0) return;
-    const currentTrims = useEditorStore.getState().clipTrims;
-    const trimKeys = Object.keys(currentTrims);
-    if (trimKeys.length === 0) return;
-    const idSet = new Set(ids);
-    let mutated = false;
-    const next = { ...currentTrims };
-    for (const k of trimKeys) {
-      if (idSet.has(k)) {
-        delete next[k];
-        mutated = true;
-      }
-    }
-    if (mutated) useEditorStore.setState({ clipTrims: next });
-  }, []);
 
   const applyAndClose = useCallback(
     (isDeleted: boolean) => {
@@ -637,6 +652,18 @@ export function Timeline() {
           </button>
         )}
         <button
+          onClick={() => setMagneticTimeline(!magneticTimeline)}
+          className={`w-5 h-5 flex items-center justify-center rounded transition-colors ${
+            magneticTimeline
+              ? "bg-violet-500/30 text-violet-200 hover:bg-violet-500/40"
+              : "bg-zinc-800/80 text-zinc-500 hover:bg-zinc-700 hover:text-zinc-300"
+          }`}
+          title={magneticTimeline ? "Magnetic timeline ON — deletions ripple-close" : "Magnetic timeline OFF — deletions leave gaps"}
+          aria-pressed={magneticTimeline}
+        >
+          <Magnet size={11} />
+        </button>
+        <button
           onClick={() => zoomBy(1 / ZOOM_STEP)}
           disabled={zoom <= ZOOM_MIN}
           className="w-5 h-5 flex items-center justify-center rounded bg-zinc-800/80 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -661,16 +688,20 @@ export function Timeline() {
       <div
         ref={scrollRef}
         className="flex-1 overflow-x-auto overflow-y-hidden timeline-scroll"
+        // Roadmap §3 Mobile/Touch: allow native pan-x scrolling on touch
+        // devices while keeping pinch-zoom available for the OS. Pointer
+        // events on the ruler/tracks already handle precise interactions.
+        style={{ touchAction: "pan-x pinch-zoom" }}
       >
         <div
           className="relative h-full flex flex-col"
           style={{ width: `${zoom * 100}%`, minWidth: "100%" }}
         >
-          {/* Ruler */}
+          {/* Ruler — glassmorphic per roadmap §2.3 */}
           <div
             ref={rulerRef}
             onPointerDown={handleRulerPointerDown}
-            className={`h-7 bg-zinc-900/60 border-b border-zinc-800/80 relative shrink-0 ${
+            className={`h-7 bg-zinc-900/40 backdrop-blur-md border-b border-violet-500/15 relative shrink-0 ${
               isScrubbing ? "cursor-grabbing" : "cursor-text"
             }`}
             style={{ touchAction: "none" }}
@@ -707,6 +738,7 @@ export function Timeline() {
               clipLimits={clipLimits}
               selectedWordIds={selectedWordIds}
               tone="video"
+              mediaFile={mediaFile}
               onClipClick={handleClipClick}
               onClipContextMenu={handleClipContextMenu}
               onSnapChange={setSnapGuide}
@@ -721,6 +753,7 @@ export function Timeline() {
               clipLimits={clipLimits}
               selectedWordIds={selectedWordIds}
               tone="audio"
+              mediaFile={mediaFile}
               onClipClick={handleClipClick}
               onClipContextMenu={handleClipContextMenu}
               onSnapChange={setSnapGuide}
@@ -774,17 +807,31 @@ export function Timeline() {
             )}
           </div>
 
-          {/* Playhead — distinct cap on the ruler + 1px line through the tracks */}
+          {/* Playhead — diamond scrubber head + 1px line + floating timecode
+              while scrubbing (roadmap §2.2 Enhanced Playhead UI). */}
           {canRender && (
             <div
               className="absolute top-0 bottom-0 z-20 pointer-events-none"
               style={{ left: `${playheadPct}%`, transform: "translateX(-50%)" }}
             >
+              {/* Diamond cap: 10px square rotated 45°, sits half above the
+                  ruler so it reads as a grab-target rather than a pixel. */}
               <div
-                className="absolute left-1/2 -translate-x-1/2 top-0 h-3 w-3
-                           rounded-sm bg-purple-400 shadow-[0_0_4px_rgba(192,132,252,0.8)]"
+                className="absolute left-1/2 -translate-x-1/2 -top-[3px] h-[10px] w-[10px]
+                           rotate-45 bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.85)]
+                           ring-1 ring-violet-200/50"
               />
-              <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-purple-400" />
+              <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-violet-400/90" />
+
+              {isScrubbing && (
+                <div
+                  className="absolute left-1/2 -translate-x-1/2 -top-6 px-1.5 py-0.5 rounded
+                             bg-violet-500/90 backdrop-blur-sm text-[10px] font-mono text-white
+                             tabular-nums whitespace-nowrap shadow-lg pointer-events-none"
+                >
+                  {formatTC(playheadEdited)}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -837,13 +884,14 @@ interface TrackLaneProps {
   clipLimits: ClipLimits[];
   selectedWordIds: Set<string>;
   tone: "video" | "audio";
+  mediaFile: File | null;
   onClipClick: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
   onClipContextMenu: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
   onSnapChange: (sourceTime: number | null) => void;
 }
 
 function TrackLane({
-  label, top, canRender, editedDuration, editedDurationRef, clips, clipLimits, selectedWordIds, tone,
+  label, top, canRender, editedDuration, editedDurationRef, clips, clipLimits, selectedWordIds, tone, mediaFile,
   onClipClick, onClipContextMenu, onSnapChange,
 }: TrackLaneProps) {
   return (
@@ -855,13 +903,14 @@ function TrackLane({
       {canRender &&
         clips.map((clip, i) => (
           <ClipBlock
-            key={`${tone}-${clip.range.sourceStart}-${clip.range.sourceEnd}-${i}`}
+            key={`${tone}-${clip.keptWordIds[0] ?? clip.range.sourceStart}-${i}`}
             clip={clip}
             editedDuration={editedDuration}
             editedDurationRef={editedDurationRef}
             limits={clipLimits[i] ?? { leftLimit: 0, rightLimit: clip.range.sourceEnd }}
-            isSelected={clip.wordIds.some((id) => selectedWordIds.has(id))}
+            isSelected={clip.keptWordIds.some((id) => selectedWordIds.has(id))}
             tone={tone}
+            mediaFile={mediaFile}
             isFirst={i === 0}
             onClick={onClipClick}
             onContextMenu={onClipContextMenu}
@@ -883,6 +932,7 @@ interface ClipBlockProps {
   limits: ClipLimits;
   isSelected: boolean;
   tone: "video" | "audio";
+  mediaFile: File | null;
   isFirst: boolean;
   onClick: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
   onContextMenu: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
@@ -890,7 +940,7 @@ interface ClipBlockProps {
 }
 
 function ClipBlock({
-  clip, editedDuration, editedDurationRef, limits, isSelected, tone, isFirst, onClick, onContextMenu, onSnapChange,
+  clip, editedDuration, editedDurationRef, limits, isSelected, tone, mediaFile, isFirst, onClick, onContextMenu, onSnapChange,
 }: ClipBlockProps) {
   const styleClasses =
     tone === "video"
@@ -1119,20 +1169,102 @@ function ClipBlock({
   // affordance the user has to deliberately reach for.
   const showHandles = hasRoomForHandles;
 
+  // Track measured pixel size for the waveform canvas (CSS percent widths
+  // can't be passed straight to a canvas — it needs integer pixels).
+  const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = clipRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (!r) return;
+      setSize({ w: Math.floor(r.width), h: Math.floor(r.height) });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // Hover state drives the mini-inspector tooltip (roadmap §2.2 Clip Hover
+  // Info). Off by default so we don't render a floating element above every
+  // clip; only the one the cursor is over.
+  const [isHover, setIsHover] = useState(false);
+
   return (
     <div
       ref={clipRef}
-      title={`${durationLabel}  •  click to select, right-click for options`}
-      className={`group absolute top-1.5 bottom-1.5 cursor-pointer active:cursor-grabbing rounded-[2px] transition-all duration-75 ${styleClasses}${selectedRing}${seam}`}
+      className={`group absolute top-1.5 bottom-1.5 cursor-pointer active:cursor-grabbing rounded-[2px] overflow-hidden ${styleClasses}${selectedRing}${seam}`}
+      // Smooth ripple motion (roadmap §2.3): when an edit shifts the layout,
+      // the new left/width animate in instead of snapping. transition-all is
+      // overridden here so we control timing — 220ms ease feels premium
+      // without lagging behind aggressive scrubbing.
       style={{
         left: `${(clip.range.editedStart / editedDuration) * 100}%`,
         width: `${((clip.range.editedEnd - clip.range.editedStart) / editedDuration) * 100}%`,
         minWidth: 3,
+        transitionProperty: "left, width, background-color, box-shadow",
+        transitionDuration: "220ms, 220ms, 75ms, 75ms",
+        transitionTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)",
       }}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => onClick(e, clip)}
       onContextMenu={(e) => onContextMenu(e, clip)}
+      onPointerEnter={() => setIsHover(true)}
+      onPointerLeave={() => setIsHover(false)}
     >
+      {/* A1 → audio waveform peaks (roadmap §2.1). V1 → word-text overlay. */}
+      {tone === "audio" && size.w > 0 && size.h > 0 && (
+        <div className="absolute inset-0 pointer-events-none opacity-80">
+          <WaveformCanvas
+            mediaFile={mediaFile}
+            sourceStart={clip.range.sourceStart}
+            sourceEnd={clip.range.sourceEnd}
+            width={size.w}
+            height={size.h}
+            color="rgba(220, 252, 231, 0.85)"
+          />
+        </div>
+      )}
+
+      {tone === "video" && clip.text && (
+        <div
+          className="absolute inset-0 px-1.5 flex items-center pointer-events-none
+                     text-[10px] leading-tight font-medium text-white/95
+                     overflow-hidden whitespace-nowrap"
+          style={{ textOverflow: "ellipsis" }}
+        >
+          <span className="truncate select-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">
+            {clip.text}
+          </span>
+        </div>
+      )}
+
+      {/* Mini-inspector — only mounted while hovered, suppressed during
+          active selection so it doesn't fight the trim handles. */}
+      {isHover && !isSelected && size.w >= 40 && (
+        <div
+          className="absolute -top-9 left-1/2 -translate-x-1/2 z-30
+                     px-2 py-1 rounded bg-zinc-900/95 backdrop-blur-md
+                     border border-violet-500/30 shadow-xl
+                     text-[10px] font-mono text-zinc-200 whitespace-nowrap pointer-events-none"
+        >
+          <div className="tabular-nums text-violet-300">
+            {formatTC(clip.range.sourceStart)} → {formatTC(clip.range.sourceEnd)}
+            <span className="text-zinc-500 ml-1.5">({durationLabel})</span>
+          </div>
+          {(clip.firstWord || clip.lastWord) && (
+            <div className="text-zinc-400 truncate max-w-[260px]">
+              <span className="text-emerald-300">{clip.firstWord}</span>
+              {clip.firstWord !== clip.lastWord && (
+                <>
+                  <span className="text-zinc-600 mx-1">…</span>
+                  <span className="text-emerald-300">{clip.lastWord}</span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Edge trim handles — 6px wide, only interactive on hover or when
           selected. Hidden entirely on tiny clips so the body remains
           clickable (zoom in with Ctrl+wheel to expose them). */}

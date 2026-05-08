@@ -84,6 +84,13 @@ interface EditorStore {
   splitMarkers: number[];
   clipTrims: Record<string, ClipTrim>;
 
+  // ── Timeline UX state ────────────────────────────────────────────────────
+  // Magnetic timeline: when true, deletions ripple-close (default Descript
+  // behaviour). When false, deletions leave a visible gap (Lift). Currently
+  // a UI affordance — full Lift semantics live in the edit map and are
+  // honoured wherever buildEditMap is consulted.
+  magneticTimeline: boolean;
+
   // ── Undo / redo (snapshot-based) ──────────────────────────────────────────
   historyStack: EditSnapshot[];
   futureStack: EditSnapshot[];
@@ -117,6 +124,8 @@ interface EditorStore {
   clearSplitMarkers: () => void;
   setClipTrim: (anchorId: string, trim: ClipTrim) => void;
   clearClipTrim: (anchorId: string) => void;
+  clearTrimsForIds: (ids: string[]) => void;
+  setMagneticTimeline: (on: boolean) => void;
 
   // History
   pushHistory: () => void;
@@ -167,6 +176,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
   currentTime: 0,
   splitMarkers: [],
   clipTrims: {},
+  magneticTimeline: true,
 
   historyStack: [],
   futureStack: [],
@@ -346,12 +356,18 @@ export const useEditorStore = create<EditorStore>((set) => ({
   toggleWordState: (wordId) =>
     set((s) => {
       const next = new Set(s.deletedWordIds);
+      let clipTrims = s.clipTrims;
       if (next.has(wordId)) {
         next.delete(wordId);
       } else {
         next.add(wordId);
+        // Match bulkToggleWords: drop any trim anchored on this word.
+        if (wordId in clipTrims) {
+          clipTrims = { ...clipTrims };
+          delete clipTrims[wordId];
+        }
       }
-      return { deletedWordIds: next };
+      return { deletedWordIds: next, clipTrims };
     }),
 
   resetDeletedWords: () => set({ deletedWordIds: new Set<string>() }),
@@ -372,7 +388,23 @@ export const useEditorStore = create<EditorStore>((set) => ({
       } else {
         for (const id of ids) next.delete(id);
       }
-      return { deletedWordIds: next };
+      // Auto-wipe per-clip trim records keyed by any deleted word.
+      // Trim Cleanup Policy (roadmap §1.3): a deleted word can never anchor a
+      // trim, and a stale pad on it can phantom-restore the audio underneath.
+      let clipTrims = s.clipTrims;
+      if (isDeleted) {
+        const keys = Object.keys(clipTrims);
+        if (keys.length > 0) {
+          const idSet = new Set(ids);
+          let mutated = false;
+          const nextTrims = { ...clipTrims };
+          for (const k of keys) {
+            if (idSet.has(k)) { delete nextTrims[k]; mutated = true; }
+          }
+          if (mutated) clipTrims = nextTrims;
+        }
+      }
+      return { deletedWordIds: next, clipTrims };
     }),
 
   setCurrentTime: (time) => set({ currentTime: time }),
@@ -412,6 +444,22 @@ export const useEditorStore = create<EditorStore>((set) => ({
       delete next[anchorId];
       return { clipTrims: next };
     }),
+
+  clearTrimsForIds: (ids) =>
+    set((s) => {
+      if (ids.length === 0) return s;
+      const trimKeys = Object.keys(s.clipTrims);
+      if (trimKeys.length === 0) return s;
+      const idSet = new Set(ids);
+      let mutated = false;
+      const next = { ...s.clipTrims };
+      for (const k of trimKeys) {
+        if (idSet.has(k)) { delete next[k]; mutated = true; }
+      }
+      return mutated ? { clipTrims: next } : s;
+    }),
+
+  setMagneticTimeline: (on) => set({ magneticTimeline: on }),
 
   // ── History ───────────────────────────────────────────────────────────────
   // Snapshot the three editable fields. Callers invoke pushHistory() *before*

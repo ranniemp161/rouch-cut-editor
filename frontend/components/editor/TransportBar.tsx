@@ -30,8 +30,12 @@ export function TransportBar({
 }: Props) {
   return (
     <div
-      className="flex items-center gap-4 px-4 shrink-0 border-t border-b"
-      style={{ height: 44, background: "#161616", borderColor: "#2a2a2a" }}
+      className="flex items-center gap-4 px-4 shrink-0 border-t border-b backdrop-blur-md"
+      style={{
+        height: 44,
+        background: "rgba(20, 20, 24, 0.78)",
+        borderColor: "rgba(139, 92, 246, 0.18)",
+      }}
     >
       <PlaybackControls
         isPlaying={isPlaying}

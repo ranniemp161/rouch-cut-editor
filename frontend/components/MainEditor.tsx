@@ -61,22 +61,36 @@ export default function MainEditor() {
     return () => window.removeEventListener("keydown", onKey, true);
   }, [player]);
 
-  // Autosave the user's edits (deletions + AI segment cut-state + splits) to
-  // localStorage on every change, debounced via rAF so a long drag doesn't
-  // flood storage. Keyed by transcriptId so projects don't bleed into each
-  // other. The store re-hydrates from this on next setAnalysis.
+  // Autosave to localStorage. Debounced 200ms (roadmap §3 Persistence) so a
+  // rapid trim drag doesn't fire 60 stringify-and-write operations per
+  // second — once the user pauses, the latest state lands. Plus a hard
+  // flush every 1.5s during sustained editing as a backstop against losing
+  // a drag's worth of work to a tab close.
   useEffect(() => {
-    let raf = 0;
+    let timer: number | null = null;
+    let lastFlush = 0;
     let lastDel: Set<string> | null = null;
     let lastSegs: unknown = null;
     let lastSplits: unknown = null;
     let lastTrims: unknown = null;
+    let pendingState: ReturnType<typeof useEditorStore.getState> | null = null;
+
+    const flush = () => {
+      timer = null;
+      const state = pendingState;
+      if (!state || !state.transcriptId) return;
+      saveEdits(state.transcriptId, {
+        deletedWordIds: state.deletedWordIds,
+        segments: state.segments,
+        splitMarkers: state.splitMarkers,
+        clipTrims: state.clipTrims,
+      });
+      lastFlush = Date.now();
+    };
 
     const unsubscribe = useEditorStore.subscribe((state) => {
       const tid = state.transcriptId;
       if (!tid) return;
-      // Skip when nothing user-editable changed (cheap reference checks —
-      // the store always replaces these by reference on edit).
       if (
         state.deletedWordIds === lastDel &&
         state.segments === lastSegs &&
@@ -87,20 +101,22 @@ export default function MainEditor() {
       lastSegs = state.segments;
       lastSplits = state.splitMarkers;
       lastTrims = state.clipTrims;
+      pendingState = state;
 
-      if (raf) cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(() => {
-        saveEdits(tid, {
-          deletedWordIds: state.deletedWordIds,
-          segments: state.segments,
-          splitMarkers: state.splitMarkers,
-          clipTrims: state.clipTrims,
-        });
-      });
+      // Backstop flush — if 1.5s of continuous edits go by, persist now even
+      // if the trailing edge of the debounce hasn't fired.
+      if (Date.now() - lastFlush > 1500) {
+        if (timer !== null) { clearTimeout(timer); timer = null; }
+        flush();
+        return;
+      }
+
+      if (timer !== null) clearTimeout(timer);
+      timer = window.setTimeout(flush, 200);
     });
 
     return () => {
-      if (raf) cancelAnimationFrame(raf);
+      if (timer !== null) clearTimeout(timer);
       unsubscribe();
     };
   }, []);
@@ -132,7 +148,7 @@ export default function MainEditor() {
   }, [timelineHeight]);
 
   const fps = frameRate || 23.976;
-  const activeDuration = player.duration || durationSeconds;
+  const activeDuration = player.duration;
   const isCutting = pipelineStage === "uploading" || pipelineStage === "transcribing";
   const canCut = !!mediaFile && (pipelineStage === "file_selected" || pipelineStage === "error");
   const showTranscript = pipelineStage === "ready" && segments.length > 0;
