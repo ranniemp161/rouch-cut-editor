@@ -89,7 +89,7 @@ async def process_video(file: UploadFile) -> dict[str, Any]:
         #    words because Whisper often absorbs trailing pauses into the prior
         #    word's end timestamp, hiding the silence from arithmetic-only
         #    detection.
-        silence_threshold_used = 0.4
+        silence_threshold_used = 0.3
         silences = ffmpeg_service.detect_silences(
             audio_path, min_duration=silence_threshold_used
         )

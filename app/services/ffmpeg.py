@@ -69,8 +69,8 @@ def probe_media(file_path: str) -> MediaInfo:
 
 def detect_silences(
     audio_path: str,
-    min_duration: float = 0.4,
-    noise_db: float = -30.0,
+    min_duration: float = 0.3,
+    noise_db: float = -35.0,
 ) -> list[tuple[float, float]]:
     """
     Detect silent regions in *audio_path* using FFmpeg's silencedetect filter.

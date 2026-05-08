@@ -36,7 +36,12 @@ async def upload_media(
     transcript_data = await media_service.process_video(file)
     raw_words: list[dict] = transcript_data["word_level_data"]
     silences: list[tuple[float, float]] = transcript_data.get("silences") or []
-    silence_pad = 0.05  # tiny breathing room so we don't clip the first phoneme
+    # Dynamic breathing room: very short silences get a smaller pad so we don't
+    # "keep" the silence we just detected. Longer silences keep the standard pad
+    # to avoid clipping the first/last phoneme around the cut.
+    DEFAULT_SILENCE_PAD = 0.05
+    SHORT_SILENCE_PAD = 0.02
+    SHORT_SILENCE_LIMIT = 0.5  # silences shorter than this use the small pad
 
     word_id_counter = 1
     spoken_words: list[dict] = []
@@ -51,8 +56,9 @@ async def upload_media(
     #    routinely under-report.
     silence_words: list[dict] = []
     for s_start, s_end in silences:
-        padded_start = round(s_start + silence_pad, 3)
-        padded_end = round(s_end - silence_pad, 3)
+        pad = SHORT_SILENCE_PAD if (s_end - s_start) < SHORT_SILENCE_LIMIT else DEFAULT_SILENCE_PAD
+        padded_start = round(s_start + pad, 3)
+        padded_end = round(s_end - pad, 3)
         if padded_end <= padded_start:
             continue
         silence_words.append({

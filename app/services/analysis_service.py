@@ -69,7 +69,7 @@ _FILLERS = {
 _MAX_FILLER_GAP = 4  # tokens of filler allowed between the two occurrences
 
 
-def _find_repetition_cuts(words: list[dict], min_n: int = 2, max_n: int = 6) -> list[dict]:
+def _find_repetition_cuts(words: list[dict], min_n: int = 2, max_n: int = 12) -> list[dict]:
     """
     Detect consecutive (or near-consecutive) n-gram repetitions and mark the
     *first* occurrence — plus any intervening filler — as the cut.
@@ -124,14 +124,19 @@ def _find_repetition_cuts(words: list[dict], min_n: int = 2, max_n: int = 6) -> 
 
 def _ngram_match(a: list[str], b: list[str], n: int) -> bool:
     """
-    Exact match for short n-grams; allow one differing token for n >= 4.
-    Catches restatements like "go to the next slide" / "go to the last slide".
+    Tolerance scales with phrase length:
+      - n <  4: exact match required.
+      - n in [4, 8]: allow 1 differing token (near-synonym restatements).
+      - n >  8: allow up to 25% differing tokens (long sentence retakes where
+        the speaker swaps a word or two but the thought is identical).
     """
     if a == b:
         return True
     if n < 4:
         return False
     diffs = sum(1 for x, y in zip(a, b) if x != y)
+    if n > 8:
+        return diffs <= int(n * 0.25)
     return diffs <= 1
 
 
