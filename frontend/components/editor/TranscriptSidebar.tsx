@@ -160,6 +160,7 @@ export function TranscriptSidebar() {
                     isDeleted={deletedWordIds.has(word.id)}
                     isSelected={selectedWordIds.has(word.id)}
                     isActive={isActive}
+                    isMarker={word.isMarker === true}
                     refCb={isActive ? (el) => { activeWordRef.current = el; } : undefined}
                     onClick={(e) => handleWordClick(e, word)}
                     onContextMenu={(e) => handleContextMenu(e, word)}
@@ -210,34 +211,41 @@ interface WordProps {
   isDeleted: boolean;
   isSelected: boolean;
   isActive: boolean;
+  isMarker: boolean;
   refCb?: (el: HTMLSpanElement | null) => void;
   onClick: (e: MouseEvent<HTMLSpanElement>) => void;
   onContextMenu: (e: MouseEvent<HTMLSpanElement>) => void;
 }
 
-function Word({ word, isDeleted, isSelected, isActive, refCb, onClick, onContextMenu }: WordProps) {
+function Word({ word, isDeleted, isSelected, isActive, isMarker, refCb, onClick, onContextMenu }: WordProps) {
   const base =
     "inline-block px-1 py-0.5 mr-1 rounded cursor-pointer select-none transition-colors duration-100";
 
-  // Active (karaoke) wins visually over hover/normal but yields to selection
-  // so the user's manual selection is never visually masked.
+  // Action Markers ("play clip 2", "insert b-roll", "call to action") get a
+  // distinct amber treatment instead of strike-through — they are NOT
+  // deletions, they are anchors telling the editor where to drop external
+  // assets. Selection / active states still win visually so user intent is
+  // never masked.
   const selectionClasses = isSelected
     ? "bg-purple-600/40 text-purple-100"
     : isActive
       ? "bg-purple-600/50 text-white shadow-sm"
-      : isDeleted
-        ? "opacity-40 line-through text-red-400/70"
-        : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
+      : isMarker
+        ? "bg-amber-500/15 text-amber-300 border border-amber-500/40 hover:bg-amber-500/25"
+        : isDeleted
+          ? "opacity-40 line-through text-red-400/70"
+          : "text-zinc-200 hover:bg-purple-900/50 hover:text-purple-300";
 
   const deletedOverlay = isSelected && isDeleted ? " line-through opacity-70" : "";
 
+  const titleSuffix = isMarker ? " · action marker" : "";
   return (
     <span
       ref={refCb}
       className={`${base} ${selectionClasses}${deletedOverlay}`}
       onClick={onClick}
       onContextMenu={onContextMenu}
-      title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s`}
+      title={`${word.start.toFixed(2)}s – ${word.end.toFixed(2)}s${titleSuffix}`}
     >
       {word.word}
     </span>

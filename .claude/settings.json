@@ -29,7 +29,10 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Read(//c/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/**)",
       "Bash(echo \"exit:$?\")",
-      "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$|error|warning\")"
+      "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$|error|warning\")",
+      "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$\")",
+      "Bash(grep -A1 \"Timeline\\\\.tsx$\")",
+      "Bash(python -m py_compile app/utils/text_utils.py app/services/semantic_analyzer.py app/schemas/ai_schemas.py app/schemas/analysis.py app/api/media.py)"
     ],
     "additionalDirectories": [
       "c:\\Users\\USER\\OneDrive\\Desktop\\Subi-Shop\\rouch-cut-editor\\uploads"

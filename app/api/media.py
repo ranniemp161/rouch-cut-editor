@@ -74,15 +74,20 @@ async def upload_media(
     # Merge spoken + silence in time order so the transcript reads sequentially.
     words = sorted(spoken_words + silence_words, key=lambda w: w["start"])
 
-    # 3. Semantic cut suggestions from Gemini (best-effort; non-fatal).
+    # 3. Semantic cut suggestions from Gemini (best-effort; non-fatal) +
+    #    chaotic-recording handling: verbal undo commands, frustration / meta-
+    #    talk, and Action Markers ("play clip 2 here") get tagged separately
+    #    so the frontend can show them as timeline anchors instead of cuts.
     #    Run in a thread-pool so the blocking SDK call doesn't stall the event loop.
     loop = asyncio.get_event_loop()
-    ai_cut_ids: list[str] = await loop.run_in_executor(
+    ai_cut_ids, ai_marker_ids = await loop.run_in_executor(
         None, semantic_analyzer.analyze_transcript_for_mistakes, spoken_words
     )
     cut_set = set(ai_cut_ids)
+    marker_set = set(ai_marker_ids)
     for w in words:
         w["ai_cut"] = w["id"] in cut_set
+        w["is_marker"] = w["id"] in marker_set
 
     # 4. Persist MediaAsset + Transcript in a single transaction.
     asset = MediaAsset(
@@ -110,6 +115,7 @@ async def upload_media(
         "media_id": str(asset.id),
         "transcript_id": str(transcript.id),
         "ai_cut_count": len(ai_cut_ids),
+        "marker_count": len(ai_marker_ids),
     }
 
 

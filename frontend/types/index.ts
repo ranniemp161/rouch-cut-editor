@@ -9,4 +9,11 @@ export interface WordTimestamp {
   word: string;
   start: number;
   end: number;
+  /**
+   * Action Marker — a placeholder phrase from the raw recording such as
+   * "play clip 2 here" or "include the substack call to action". Not a
+   * deletion: the transcript / timeline render markers in a distinct colour
+   * so the editor knows where to drop the external asset.
+   */
+  isMarker?: boolean;
 }

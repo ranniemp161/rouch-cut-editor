@@ -2,15 +2,22 @@
 Semantic cutting via Gemini 1.5 Flash.
 
 After Whisper produces word-level timestamps, this service asks Gemini to
-identify filler words, false starts, and stutters that should be deleted to
-make the speaker sound fluent. We use Gemini's native structured-output mode
-(response_mime_type + response_schema) so the response is guaranteed to be
-JSON that validates against the SmartCutResponse Pydantic model — no
-free-form text parsing required.
+identify filler words, false starts, stutters, verbal undo commands,
+frustration / meta-talk, and earlier "takes" inside a take-cluster — so the
+final rough cut keeps only the LAST clean attempt at every thought. We use
+Gemini's native structured-output mode (response_mime_type + response_schema)
+so the response is guaranteed to be JSON that validates against the
+SmartCutResponse Pydantic model — no free-form text parsing required.
+
+A heuristic Python pre-pass (`app.utils.text_utils`) catches obvious verbal
+undo commands and meta-talk via regex. This keeps Gemini's input cleaner
+(saves tokens) and means we still strip the worst chaos even when the API
+key is missing or the call fails.
 
 Failure mode: if GEMINI_API_KEY is missing or the API call fails, this
-service returns an empty list. The upload pipeline must remain functional
-even when the AI dependency is unavailable.
+service returns whatever the heuristic pre-pass found (or empties). The
+upload pipeline must remain functional even when the AI dependency is
+unavailable.
 """
 
 import logging
@@ -20,26 +27,30 @@ from typing import Any
 import google.generativeai as genai
 
 from app.schemas.ai_schemas import SmartCutResponse
+from app.utils.text_utils import detect_undo_and_markers, merge_cut_id_lists
 
 logger = logging.getLogger(__name__)
 
 # Configure the SDK at import time. If the key is missing we still let the
-# module load — the function below short-circuits to an empty result so
-# the rest of the app keeps working.
+# module load — the function below short-circuits to a heuristic-only result
+# so the rest of the app keeps working.
 _API_KEY = os.getenv("GEMINI_API_KEY")
 if _API_KEY:
     genai.configure(api_key=_API_KEY)
 else:
-    logger.warning("GEMINI_API_KEY not set — semantic_analyzer will return [] for every call")
+    logger.warning("GEMINI_API_KEY not set — semantic_analyzer falls back to heuristic-only output")
 
 # Override via GEMINI_MODEL if Google retires this one. As of mid-2026 the 1.5
 # series is fully decommissioned; 2.5-flash is the current fast/cheap default.
 _MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 _SYSTEM_INSTRUCTION = (
-    "You are an expert, ruthless video editor targeting a 90% PERFECT rough cut. "
-    "Analyze this raw transcript and delete every disfluency so the speaker sounds "
-    "fluent and confident.\n"
+    "You are an expert, ruthless video editor targeting a 90% PERFECT rough cut "
+    "from a CHAOTIC raw recording. The creator does multiple retakes, gives "
+    "verbal instructions to the editor, and makes meta-comments about the "
+    "recording process. Your job is to surface only the FINAL, successful take "
+    "and strip every verbal 'undo' command, placeholder instruction, and "
+    "frustration outburst.\n"
     "THE 90% MANDATE: Error on the side of CUTTING. It is easier for a human to "
     "restore a cut than to find a missed one. When in doubt, cut.\n"
     "Rule 1: Context is King. Do not cut pauses or repetition if they are CLEARLY "
@@ -63,13 +74,38 @@ _SYSTEM_INSTRUCTION = (
     "Rule 5: TARGET 'THOUGHT LOOPS'. If a speaker explains the same concept twice in a "
     "row, even with completely different words, DELETE the first attempt. Only keep the "
     "most confident and concise version.\n"
-    "Rule 6: PRIORITY ON RE-TAKES. Speakers often try a sentence 2-3 times before getting "
-    "it right. Your job is to identify the 'Final Take' and aggressively prune everything "
-    "leading up to it.\n"
-    "Rule 7: Completeness. When you cut a false start or earlier repetition, also cut any "
-    "trailing filler/connector words ('so', 'and', 'but', 'um') that bridge to the clean "
-    "take, so the final edit reads seamlessly.\n"
-    "Return ONLY a JSON array of the specific Word IDs to be deleted."
+    "Rule 6: PRIORITY ON RE-TAKES — 'The Last Take' Algorithm. Speakers iterate on a "
+    "sentence 2-4 times before getting it right. Cluster adjacent segments by INTENT "
+    "(what they're trying to say). Within a Take Cluster, ALWAYS keep the LAST take "
+    "and cut every earlier attempt — UNLESS the last take is interrupted, incomplete, "
+    "or immediately followed by a frustration line ('oh my god this is a mess'). In "
+    "that case, fall back to the second-to-last take, OR wait for an explicit reset "
+    "signal ('start now', 'okay so', 'anyway') and use whatever comes after it.\n"
+    "Rule 7: VERBAL COMMAND RECOGNITION. The creator will literally say 'cancel that "
+    "last line', 'ignore that', 'scratch that', 'sorry let's redo that', 'start "
+    "again', 'strike that'. Treat these as explicit DELETE commands. Cut the trigger "
+    "phrase itself AND the entire preceding thought (back to the previous sentence "
+    "boundary or significant pause), regardless of whether the retake matches the "
+    "deleted text. Do not require text similarity to honour the command.\n"
+    "Rule 8: META-TALK & FRUSTRATION. Identify speech directed at the creator "
+    "themselves or the editor — 'sorry', 'oh my god', 'this is a mess', 'nonsense "
+    "right now', 'what am I saying'. CUT these with high priority. After a frustration "
+    "block, search forward for the next clean sentence opening with a strong connector "
+    "('So,' 'Anyway,' 'Now,' 'Okay,'). Cut everything from the frustration trigger up "
+    "to (but not including) that reset connector.\n"
+    "Rule 9: ACTION MARKERS — DO NOT CUT, TAG. Phrases like 'play clip 2 here', "
+    "'insert b-roll', 'include the substack call to action', 'cut to b-roll' are "
+    "instructions to a future editor. They are NOT part of the spoken script and "
+    "should NOT appear in `words_to_cut`. Instead, return the IDs of every word "
+    "inside the marker phrase in `action_marker_ids`. The frontend will render "
+    "these in a distinct colour as a timeline anchor; the audio is hidden but the "
+    "marker stays visible.\n"
+    "Rule 10: Completeness. When you cut a false start or earlier repetition, also "
+    "cut any trailing filler/connector words ('so', 'and', 'but', 'um') that bridge "
+    "to the clean take, so the final edit reads seamlessly.\n"
+    "Return a JSON object with `words_to_cut` (array of Word IDs to delete) and "
+    "`action_marker_ids` (array of Word IDs to tag as markers — these are NOT cut). "
+    "An ID must appear in at most one of the two lists."
 )
 
 # Lone connector words that, when stranded immediately before a cut region,
@@ -84,51 +120,83 @@ _CHUNK_DURATION_S = 300.0         # 5 minutes
 _CHUNK_OVERLAP_S = 30.0           # 30s overlap to avoid context-window forgetfulness
 
 
-def analyze_transcript_for_mistakes(word_level_data: list[dict[str, Any]]) -> list[str]:
+def analyze_transcript_for_mistakes(
+    word_level_data: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
     """
-    Send the transcript to Gemini and return the IDs of words to cut.
+    Send the transcript to Gemini and return ``(cut_ids, marker_ids)``.
 
     Each item in `word_level_data` must contain at least the keys
     `id` (str) and `word` (str). Items without an `id` are skipped because
     Gemini would have no way to refer back to them.
 
-    Returns the deduplicated list of IDs Gemini flagged as filler/false
-    starts, filtered to those that exist in the input. Returns an empty
-    list on any failure — callers should treat this as a soft-fail.
+    Returns a 2-tuple:
+      - cut_ids: deduplicated, in-order list of word IDs to delete
+        (false starts, filler, repetitions, verbal undo + the thought it
+        cancels, meta-talk / frustration, earlier retakes).
+      - marker_ids: word IDs inside Action Marker phrases ("play clip 2",
+        "insert b-roll", "call to action") — to be tagged ``is_marker``,
+        NOT deleted.
+
+    Soft-fail: if Gemini is unreachable, we still run the heuristic
+    pre-pass and return whatever it caught.
     """
-    if not _API_KEY or not word_level_data:
-        return []
+    if not word_level_data:
+        return [], []
 
     valid_ids: set[str] = {str(w["id"]) for w in word_level_data if "id" in w}
     if not valid_ids:
-        return []
+        return [], []
 
-    # Decide whether to send the whole transcript in one call or split it into
-    # 5-minute overlapping chunks. The chunked path gives Gemini ample
-    # surrounding context per call and avoids long-context "forgetfulness".
-    duration = _approx_duration(word_level_data)
-    if duration > _LONG_VIDEO_THRESHOLD_S:
-        chunks = _chunk_words(word_level_data, _CHUNK_DURATION_S, _CHUNK_OVERLAP_S)
-    else:
-        chunks = [word_level_data]
+    # 1. Heuristic pre-pass — cheap, deterministic, runs even without an API
+    #    key. Catches the obvious verbal-undo / marker / meta-talk phrases.
+    heuristic_cuts, heuristic_markers = detect_undo_and_markers(word_level_data)
 
-    cut_ids_ordered: list[str] = []
-    seen: set[str] = set()
-    for chunk in chunks:
-        for wid in _analyze_chunk(chunk):
-            if wid in valid_ids and wid not in seen:
-                seen.add(wid)
-                cut_ids_ordered.append(wid)
+    # 2. Gemini pass (skipped if no API key).
+    gemini_cuts: list[str] = []
+    gemini_markers: list[str] = []
+    if _API_KEY:
+        # Decide whether to send the whole transcript in one call or split it
+        # into 5-minute overlapping chunks. The chunked path gives Gemini ample
+        # surrounding context per call and avoids long-context "forgetfulness".
+        duration = _approx_duration(word_level_data)
+        if duration > _LONG_VIDEO_THRESHOLD_S:
+            chunks = _chunk_words(word_level_data, _CHUNK_DURATION_S, _CHUNK_OVERLAP_S)
+        else:
+            chunks = [word_level_data]
+
+        seen_cuts: set[str] = set()
+        seen_markers: set[str] = set()
+        for chunk in chunks:
+            chunk_cuts, chunk_markers = _analyze_chunk(chunk)
+            for wid in chunk_cuts:
+                if wid in valid_ids and wid not in seen_cuts:
+                    seen_cuts.add(wid)
+                    gemini_cuts.append(wid)
+            for wid in chunk_markers:
+                if wid in valid_ids and wid not in seen_markers:
+                    seen_markers.add(wid)
+                    gemini_markers.append(wid)
+
+    # 3. Merge heuristic + Gemini results. Cuts win over markers for any
+    #    overlap (the cut-side is always the safer destructive action and a
+    #    region tagged as both is almost certainly misclassified).
+    cut_ids = merge_cut_id_lists(heuristic_cuts, gemini_cuts)
+    cut_set = set(cut_ids)
+    marker_ids = [
+        mid for mid in merge_cut_id_lists(heuristic_markers, gemini_markers)
+        if mid not in cut_set
+    ]
 
     # Clean up "hanging" connector words on the edges of every cut region.
-    cut_ids_ordered = _glue_connectors(word_level_data, cut_ids_ordered)
-    return cut_ids_ordered
+    cut_ids = _glue_connectors(word_level_data, cut_ids)
+    return cut_ids, marker_ids
 
 
-def _analyze_chunk(chunk: list[dict[str, Any]]) -> list[str]:
-    """Send a single chunk of words to Gemini and return its cut IDs."""
+def _analyze_chunk(chunk: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """Send a single chunk of words to Gemini and return (cuts, markers)."""
     if not chunk:
-        return []
+        return [], []
     chunk_ids = {str(w["id"]) for w in chunk if "id" in w}
     formatted = _format_transcript(chunk)
     try:
@@ -146,8 +214,10 @@ def _analyze_chunk(chunk: list[dict[str, Any]]) -> list[str]:
         result = SmartCutResponse.model_validate_json(response.text)
     except Exception as exc:  # noqa: BLE001 — soft-fail on any SDK / network error
         logger.warning("Gemini semantic-cut call failed: %r", exc)
-        return []
-    return [wid for wid in dict.fromkeys(result.words_to_cut) if wid in chunk_ids]
+        return [], []
+    cuts = [wid for wid in dict.fromkeys(result.words_to_cut) if wid in chunk_ids]
+    markers = [wid for wid in dict.fromkeys(result.action_marker_ids) if wid in chunk_ids]
+    return cuts, markers
 
 
 def _approx_duration(words: list[dict[str, Any]]) -> float:

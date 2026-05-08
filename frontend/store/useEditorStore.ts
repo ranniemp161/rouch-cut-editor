@@ -244,6 +244,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       word: w.word,
       start: w.start,
       end: w.end,
+      isMarker: w.is_marker ?? false,
     }));
 
     // Seed deletions with the backend's analysis (semantic + silence cuts).

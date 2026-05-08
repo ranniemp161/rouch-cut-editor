@@ -24,6 +24,18 @@ class SmartCutResponse(BaseModel):
         default_factory=list,
         description=(
             "Unique IDs of words to delete: false starts, filler words, "
-            "stutters, and unnecessary repetitions."
+            "stutters, unnecessary repetitions, verbal undo commands "
+            "('cancel that', 'ignore that') AND the preceding thought they "
+            "undo, frustration / meta-talk ('this is a mess'), and earlier "
+            "takes from a Take Cluster — keep only the LAST take."
+        ),
+    )
+    action_marker_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Unique IDs of words inside an Action Marker phrase ('play clip 2', "
+            "'insert b-roll', 'call to action'). These are NOT cuts — the "
+            "frontend renders them in a distinct colour so the editor knows "
+            "where to drop the external asset."
         ),
     )

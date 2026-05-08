@@ -544,6 +544,108 @@ export function Timeline() {
         return;
       }
 
+      // Shift+Arrow — symmetric edge nudging on the current selection
+      // (or playhead if none). The arrow direction picks which edge of the
+      // selection is being moved; Alt picks the direction of motion:
+      //
+      //   Shift+→        Extend right edge: restore the next deleted word
+      //                  past the selection's right side.
+      //   Shift+←        Extend left edge: restore the previous deleted word
+      //                  before the selection's left side.
+      //   Shift+Alt+→    Shrink right edge: cut the rightmost word of the
+      //                  selection. Selection contracts inward.
+      //   Shift+Alt+←    Shrink left edge: cut the leftmost word of the
+      //                  selection.
+      //
+      // Each press rolls the affected word into / out of the selection so
+      // the same key can be tapped repeatedly to keep moving the same edge.
+      // [SILENCE] markers are skipped on extend (restoring is meaningless)
+      // but counted on shrink so the user always converges.
+      if (e.shiftKey && (e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+        const dir: 1 | -1 = e.key === "ArrowRight" ? 1 : -1;
+        const shrink = e.altKey;
+        const sel = state.selectedWordIds;
+        const transcript = state.transcript;
+        const deleted = state.deletedWordIds;
+
+        // ── Shrink path ────────────────────────────────────────────────
+        // Cut the right-most (dir=1) or left-most (dir=-1) currently kept
+        // word in the selection. Without a selection there's nothing to
+        // shrink — bail silently.
+        if (shrink) {
+          if (sel.size === 0) return;
+          let target: typeof transcript[number] | null = null;
+          if (dir === 1) {
+            for (let i = transcript.length - 1; i >= 0; i--) {
+              const w = transcript[i];
+              if (!sel.has(w.id) || deleted.has(w.id)) continue;
+              if (w.word === "[SILENCE]") continue;
+              target = w; break;
+            }
+          } else {
+            for (let i = 0; i < transcript.length; i++) {
+              const w = transcript[i];
+              if (!sel.has(w.id) || deleted.has(w.id)) continue;
+              if (w.word === "[SILENCE]") continue;
+              target = w; break;
+            }
+          }
+          if (!target) return;
+          e.preventDefault();
+          pushHistory();
+          bulkToggleWords([target.id], true);
+          clearTrimsForIds([target.id]);
+          // Drop the cut word from the selection so the next press finds
+          // the new edge.
+          const nextSel = new Set(sel);
+          nextSel.delete(target.id);
+          setSelectedWords(nextSel);
+          return;
+        }
+
+        // ── Extend path ────────────────────────────────────────────────
+        // Anchor source time. With a selection: the right (dir=1) or left
+        // (dir=-1) bound of the selection. Without: the playhead.
+        let anchor: number;
+        if (sel.size > 0) {
+          let lo = Infinity;
+          let hi = -Infinity;
+          for (const w of transcript) {
+            if (!sel.has(w.id)) continue;
+            if (w.start < lo) lo = w.start;
+            if (w.end > hi) hi = w.end;
+          }
+          if (lo === Infinity) return;
+          anchor = dir === 1 ? hi : lo;
+        } else {
+          anchor = now;
+        }
+
+        let target: typeof transcript[number] | null = null;
+        if (dir === 1) {
+          for (const w of transcript) {
+            if (w.word === "[SILENCE]") continue;
+            if (!deleted.has(w.id)) continue;
+            if (w.start >= anchor - 0.005) { target = w; break; }
+          }
+        } else {
+          for (let i = transcript.length - 1; i >= 0; i--) {
+            const w = transcript[i];
+            if (w.word === "[SILENCE]") continue;
+            if (!deleted.has(w.id)) continue;
+            if (w.end <= anchor + 0.005) { target = w; break; }
+          }
+        }
+        if (!target) return;
+        e.preventDefault();
+        pushHistory();
+        bulkToggleWords([target.id], false);
+        const nextSel = new Set(sel);
+        nextSel.add(target.id);
+        setSelectedWords(nextSel);
+        return;
+      }
+
       // S — splice the active clip at the playhead.
       if (k === "s") {
         e.preventDefault();
@@ -867,7 +969,7 @@ export function Timeline() {
                       className="h-5 px-1.5 rounded text-[10px] font-medium text-zinc-300
                                  hover:bg-emerald-500/30 hover:text-emerald-100 transition-colors
                                  flex items-center gap-1"
-                      title="Restore selection"
+                      title="Restore selection · Shift+←/→ extends one word at a time"
                     >
                       <RotateCw size={10} />
                       Restore
@@ -877,7 +979,7 @@ export function Timeline() {
                       className="h-5 px-1.5 rounded text-[10px] font-medium text-zinc-300
                                  hover:bg-red-500/40 hover:text-red-100 transition-colors
                                  flex items-center gap-1"
-                      title="Delete selection (Backspace)"
+                      title="Delete selection (Backspace) · Shift+Alt+←/→ shrinks one word at a time"
                     >
                       <Scissors size={10} />
                       Delete
@@ -1113,9 +1215,10 @@ function ClipBlock({
   // (silence / repetition) that overlap the dragged range. Without the
   // segment step, restored words appear orphaned with gaps between them.
   //
-  // pxPerSec is recomputed on every pointermove from the lane's current
-  // width and the live editedDuration — both of which change as the clip
-  // grows during the drag.
+  // pxPerSec is snapshotted at pointerdown and held constant for the drag.
+  // Recomputing it from the live editedDuration would create a feedback
+  // loop with restored content (drag outward → duration grows → pxPerSec
+  // shrinks → drag becomes hyper-sensitive and overshoots).
   const handleEdgePointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") => {
       if (e.button !== 0) return;
@@ -1168,11 +1271,22 @@ function ClipBlock({
       // first mutation so undo restores the pre-drag state.
       useEditorStore.getState().pushHistory();
 
+      // Snapshot the px/sec ratio at pointerdown and keep it fixed for the
+      // entire drag. Recomputing on every pointermove caused a feedback
+      // loop: dragging outward restored content → editedDuration grew →
+      // pxPerSec shrank → the next pixel of cursor motion mapped to *more*
+      // seconds → the drag accelerated and overshot. With a frozen ratio,
+      // 100 px of cursor motion always means the same source-time delta.
+      const initLaneWidth = laneEl.getBoundingClientRect().width;
+      const initEditedDuration = editedDurationRef.current || editedDuration;
+      const initPxPerSec =
+        initLaneWidth > 0 && initEditedDuration > 0
+          ? initLaneWidth / initEditedDuration
+          : 0;
+
       const onMove = (ev: PointerEvent) => {
-        const laneWidth = laneEl.getBoundingClientRect().width;
-        const ed = editedDurationRef.current || editedDuration;
-        if (laneWidth <= 0 || ed <= 0) return;
-        const pxPerSec = laneWidth / ed;
+        if (initPxPerSec <= 0) return;
+        const pxPerSec = initPxPerSec;
         const dSec = (ev.clientX - startX) / pxPerSec;
         let target = initSrc + dSec;
         if (side === "right") {
@@ -1425,6 +1539,7 @@ function ClipBlock({
                         ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
             onPointerDown={(e) => handleEdgePointerDown(e, "left")}
             onClick={(e) => e.stopPropagation()}
+            title="Drag to trim left edge · Shift+← extend · Shift+Alt+← shrink"
           >
             <div className="absolute inset-y-1 left-0 w-[3px] rounded-r-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
           </div>
@@ -1433,6 +1548,7 @@ function ClipBlock({
                         ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
             onPointerDown={(e) => handleEdgePointerDown(e, "right")}
             onClick={(e) => e.stopPropagation()}
+            title="Drag to trim right edge · Shift+→ extend · Shift+Alt+→ shrink"
           >
             <div className="absolute inset-y-1 right-0 w-[3px] rounded-l-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
           </div>

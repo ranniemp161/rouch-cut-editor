@@ -10,6 +10,11 @@ class WordItem(BaseModel):
     id: str | None = None
     ai_cut: bool = False
     is_silence: bool = False
+    # Action Marker — a placeholder phrase like "play clip 2 here" or
+    # "include the substack call to action". NOT a cut: the frontend renders
+    # markers in a distinct colour so the editor knows where to drop the
+    # external asset on the timeline.
+    is_marker: bool = False
 
 
 class AnalysisSegment(BaseModel):
