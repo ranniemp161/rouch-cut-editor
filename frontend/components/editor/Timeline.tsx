@@ -20,6 +20,7 @@ import {
   type KeptRange,
 } from "@/lib/editMap";
 import { WaveformCanvas } from "./WaveformCanvas";
+import { FrameStrip } from "./FrameStrip";
 
 type Lane = "V1" | "A1";
 
@@ -205,10 +206,16 @@ export function Timeline() {
           }
           j++;
         }
-        if (keptIds.length > 0) {
-          // Build the visible text from kept (non-deleted) words only, so
-          // the V1 overlay reads as the *edited* transcript not the raw one.
-          // Skip [SILENCE] markers — they're internal state, not text.
+        // Render every sub-clip whose span has real duration. Deletions are
+        // already excluded at the edit-map level (deleted regions truncate
+        // the parent kept range), so a sub-clip surviving to here represents
+        // playable timeline real estate — even if its only contents are
+        // silence or [SILENCE] markers. Filtering here would punch visible
+        // gaps in the timeline at silence boundaries between split markers,
+        // which the user reads as broken layout. Keep the clip; the actual
+        // audio for any deleted words inside it is silent thanks to the
+        // edit-map's deleted-region skip.
+        if (subEnd - subStart > 0.0005) {
           const keptSet = new Set(keptIds);
           const keptWords: string[] = [];
           for (let k = 0; k < transcript.length; k++) {
@@ -609,6 +616,70 @@ export function Timeline() {
     return out;
   }, [canRender, editedDuration, zoom]);
 
+  // Selection bounds in edited time — feeds the floating toolbar position.
+  // Falls back across deleted words: if a selected word has been cut, its
+  // source time has no edited mapping; we then snap to the start of the
+  // next kept range so the toolbar still has somewhere to anchor for
+  // Restore. Selections with zero kept-or-snappable words hide the toolbar.
+  const selectionBounds = useMemo(() => {
+    if (selectedWordIds.size === 0 || !canRender) return null;
+    const idLookup = new Map<string, number>();
+    transcript.forEach((w, i) => idLookup.set(w.id, i));
+
+    let minE = Infinity;
+    let maxE = -Infinity;
+    let count = 0;
+    for (const id of selectedWordIds) {
+      const idx = idLookup.get(id);
+      if (idx === undefined) continue;
+      const w = transcript[idx];
+      const s = sourceToEdited(w.start, editMap);
+      const e = sourceToEdited(Math.max(w.start, w.end - 0.001), editMap);
+      // For a deleted word, both mappings will be null. Snap to the nearest
+      // kept-range edge so the toolbar still anchors meaningfully.
+      let lo = s;
+      let hi = e;
+      if (lo === null && hi === null) {
+        for (const r of editMap.keptRanges) {
+          if (r.sourceStart >= w.start) { lo = r.editedStart; hi = r.editedStart; break; }
+        }
+      }
+      if (lo !== null) { minE = Math.min(minE, lo); count++; }
+      if (hi !== null) { maxE = Math.max(maxE, hi); }
+    }
+    if (count === 0 || minE === Infinity) return null;
+    if (maxE === -Infinity) maxE = minE;
+    return { startE: minE, endE: maxE, count: selectedWordIds.size };
+  }, [selectedWordIds, transcript, editMap, canRender]);
+
+  const handleSelectionDelete = useCallback(() => {
+    const ids = Array.from(selectedWordIds);
+    if (ids.length === 0) return;
+    pushHistory();
+    bulkToggleWords(ids, true);
+    clearTrimsForIds(ids);
+    setSelectedWords(new Set());
+    setRangeSelection(null);
+  }, [bulkToggleWords, clearTrimsForIds, pushHistory, selectedWordIds, setSelectedWords]);
+
+  const handleSelectionRestore = useCallback(() => {
+    const ids = Array.from(selectedWordIds);
+    if (ids.length === 0) return;
+    pushHistory();
+    bulkToggleWords(ids, false);
+  }, [bulkToggleWords, pushHistory, selectedWordIds]);
+
+  const handleSplitAtPlayhead = useCallback(() => {
+    const state = useEditorStore.getState();
+    const now = state.currentTime;
+    const insideKept = editMap.keptRanges.some(
+      (r) => now > r.sourceStart + 0.005 && now < r.sourceEnd - 0.005,
+    );
+    if (!insideKept) return;
+    pushHistory();
+    addSplitMarker(now);
+  }, [addSplitMarker, editMap, pushHistory]);
+
   // Split markers — keep only ones that survived the ripple, mapped to edited.
   const visibleSplitMarkers = useMemo(() => {
     if (!canRender) return [] as number[];
@@ -758,6 +829,63 @@ export function Timeline() {
               onClipContextMenu={handleClipContextMenu}
               onSnapChange={setSnapGuide}
             />
+
+            {/* Floating selection toolbar — CapCut-style contextual bar
+                that follows the centroid of the current selection. Hidden
+                when nothing is selected. Buttons mirror the right-click
+                menu plus Split-at-playhead for quick clip slicing. */}
+            {selectionBounds && canRender && (() => {
+              const midPct = ((selectionBounds.startE + selectionBounds.endE) / 2 / editedDuration) * 100;
+              return (
+                <div
+                  className="absolute z-40 pointer-events-none"
+                  style={{ left: `${midPct}%`, top: 4 }}
+                >
+                  <div
+                    className="absolute -translate-x-1/2 flex items-center gap-0.5 px-1 py-0.5
+                               rounded-md bg-zinc-900/95 backdrop-blur-md
+                               border border-violet-500/40 shadow-2xl
+                               pointer-events-auto whitespace-nowrap"
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    <span className="text-[10px] font-mono text-violet-300 px-1.5 select-none tabular-nums">
+                      {selectionBounds.count}
+                    </span>
+                    <div className="w-px h-3.5 bg-zinc-700/80" />
+                    <button
+                      onClick={handleSplitAtPlayhead}
+                      className="h-5 px-1.5 rounded text-[10px] font-medium text-zinc-300
+                                 hover:bg-violet-500/30 hover:text-violet-100 transition-colors
+                                 flex items-center gap-1"
+                      title="Split at playhead (S)"
+                    >
+                      <Scissors size={10} />
+                      Split
+                    </button>
+                    <button
+                      onClick={handleSelectionRestore}
+                      className="h-5 px-1.5 rounded text-[10px] font-medium text-zinc-300
+                                 hover:bg-emerald-500/30 hover:text-emerald-100 transition-colors
+                                 flex items-center gap-1"
+                      title="Restore selection"
+                    >
+                      <RotateCw size={10} />
+                      Restore
+                    </button>
+                    <button
+                      onClick={handleSelectionDelete}
+                      className="h-5 px-1.5 rounded text-[10px] font-medium text-zinc-300
+                                 hover:bg-red-500/40 hover:text-red-100 transition-colors
+                                 flex items-center gap-1"
+                      title="Delete selection (Backspace)"
+                    >
+                      <Scissors size={10} />
+                      Delete
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
 
             {snapGuide !== null && canRender && (() => {
               const editedSnap = sourceToEdited(snapGuide, editMap);
@@ -1225,17 +1353,39 @@ function ClipBlock({
         </div>
       )}
 
-      {tone === "video" && clip.text && (
-        <div
-          className="absolute inset-0 px-1.5 flex items-center pointer-events-none
-                     text-[10px] leading-tight font-medium text-white/95
-                     overflow-hidden whitespace-nowrap"
-          style={{ textOverflow: "ellipsis" }}
-        >
-          <span className="truncate select-none drop-shadow-[0_1px_1px_rgba(0,0,0,0.6)]">
-            {clip.text}
-          </span>
-        </div>
+      {tone === "video" && size.w > 0 && size.h > 0 && (
+        <>
+          <FrameStrip
+            mediaFile={mediaFile}
+            sourceStart={clip.range.sourceStart}
+            sourceEnd={clip.range.sourceEnd}
+            width={size.w}
+            height={size.h}
+          />
+          {/* Caption strip — sits along the bottom edge with a gradient
+              backdrop so the text reads against any thumbnail. Hidden on
+              clips too narrow to fit a few characters. */}
+          {clip.text && size.w >= 28 && (
+            <div
+              className="absolute left-0 right-0 bottom-0 px-1 pt-2 pb-0.5 pointer-events-none
+                         text-[10px] leading-none font-medium text-white
+                         overflow-hidden whitespace-nowrap"
+              style={{
+                textOverflow: "ellipsis",
+                background:
+                  "linear-gradient(to top, rgba(0,0,0,0.65) 0%, rgba(0,0,0,0.25) 60%, rgba(0,0,0,0) 100%)",
+              }}
+            >
+              <span className="truncate select-none block">{clip.text}</span>
+            </div>
+          )}
+          {/* Faint violet tint over the thumbnails to keep the brand color
+              readable across mixed-luminance content. */}
+          <div
+            className="absolute inset-0 pointer-events-none mix-blend-overlay"
+            style={{ background: "rgba(139, 92, 246, 0.12)" }}
+          />
+        </>
       )}
 
       {/* Mini-inspector — only mounted while hovered, suppressed during

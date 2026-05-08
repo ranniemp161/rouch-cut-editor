@@ -28,7 +28,8 @@
       "WebFetch(domain:api.github.com)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Read(//c/Users/USER/OneDrive/Desktop/Subi-Shop/rouch-cut-editor/**)",
-      "Bash(echo \"exit:$?\")"
+      "Bash(echo \"exit:$?\")",
+      "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$|error|warning\")"
     ],
     "additionalDirectories": [
       "c:\\Users\\USER\\OneDrive\\Desktop\\Subi-Shop\\rouch-cut-editor\\uploads"
