@@ -1,6 +1,26 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorStore, type TranscriptSegment } from "@/store/useEditorStore";
-import { buildEditMap, sourceToEdited, editedToSource } from "@/lib/editMap";
+import { buildEditMap, sourceToEdited, editedToSource, type EditMap } from "@/lib/editMap";
+
+// How far before a deleted region we issue the seek. Browser seeks have
+// 30–150ms of latency, so a purely reactive skip leaks that much deleted
+// audio every time. 80ms of look-ahead lets the seek complete *before* the
+// audio decoder reaches the cut point. The cost is at most one frame of
+// kept audio chopped at the boundary — inaudible vs. hearing the cut word.
+const SKIP_LOOKAHEAD_S = 0.08;
+
+// Snap a source-time into the nearest kept range. If the time lands inside
+// a deleted region, we jump to the start of the next kept range; if no
+// later kept range exists, we clamp back to the previous one's end. Used
+// to prevent the playhead from ever being parked inside a cut.
+function snapToKept(t: number, map: EditMap): number {
+  const inside = map.deletedRegions.find((r) => t >= r.start && t < r.end);
+  if (!inside) return t;
+  const next = map.keptRanges.find((r) => r.sourceStart >= inside.end);
+  if (next) return next.sourceStart;
+  const last = map.keptRanges[map.keptRanges.length - 1];
+  return last ? last.sourceEnd : t;
+}
 /**
  * Encapsulates HTMLVideoElement state and provides cut-aware playback.
  *
@@ -20,12 +40,15 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   const setStoreCurrentTime = useEditorStore((s) => s.setCurrentTime);
   const transcript = useEditorStore((s) => s.transcript);
   const deletedWordIds = useEditorStore((s) => s.deletedWordIds);
+  const clipTrims = useEditorStore((s) => s.clipTrims);
 
   // Single source of truth for cut-skipping: the same edit map the timeline
   // uses to render the ripple view. Re-derived whenever deletions change.
+  // clipTrims feeds in so the rAF skip respects sub-word edge nudges — a
+  // padEnd of +0.1s lets that 100ms of "deleted" tail actually play.
   const editMap = useMemo(
-    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration),
-    [transcript, deletedWordIds, segments, sourceDuration],
+    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
+    [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
   );
   const deletedRuns = editMap.deletedRegions;
 
@@ -72,6 +95,18 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
 
   // 60Hz cut-skip loop. Only runs while the video is actually playing —
   // when paused, the native `timeupdate` is enough.
+  //
+  // Predictive skip: instead of waiting until we're inside a deleted region
+  // (and leaking 50–150ms of seek-latency audio), we issue the seek
+  // SKIP_LOOKAHEAD_S seconds *before* the cut point. The lookahead absorbs
+  // the seek latency so playback transitions cleanly across every deletion.
+  //
+  // Seek-storm suppression uses the native `v.seeking` flag, NOT a ref
+  // pinned to the target time. With a target-pinned ref, a slow seek (large
+  // .mov files seek in 200–500ms) lets `t` advance *into* the deletion
+  // while we're locked out of re-issuing — the deletion audio plays through
+  // until t reaches r.end. With v.seeking, we re-issue every frame the
+  // browser is idle, so a slow seek either lands or gets nudged again.
   useEffect(() => {
     if (!isPlaying) return;
     let raf = 0;
@@ -79,8 +114,18 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
       const v = videoRef.current;
       if (v && !v.paused && !v.ended) {
         const t = v.currentTime;
-        const deleted = deletedRunsRef.current.find((r) => t >= r.start && t < r.end);
-        if (deleted) v.currentTime = deleted.end;
+        const runs = deletedRunsRef.current;
+        // Walk forward to the first region whose end is still ahead of us.
+        // Regions are pre-sorted so this is cheap; for thousands of cuts a
+        // binary search would be warranted, but we don't get near that scale.
+        for (let i = 0; i < runs.length; i++) {
+          const r = runs[i];
+          if (r.end <= t) continue;
+          if (t >= r.start - SKIP_LOOKAHEAD_S && t < r.end && !v.seeking) {
+            v.currentTime = r.end;
+          }
+          break;
+        }
         setSourceTime(v.currentTime);
         setStoreCurrentTime(v.currentTime);
       }
@@ -123,7 +168,9 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
 
   const seekToEdited = useCallback((et: number) => {
     if (!videoRef.current) return;
-    const st = editedToSource(et, editMapRef.current);
+    // editedToSource always lands in a kept range by construction, but pass
+    // through snapToKept anyway for symmetry with the seekTime path.
+    const st = snapToKept(editedToSource(et, editMapRef.current), editMapRef.current);
     videoRef.current.currentTime = st;
     setSourceTime(st);
     setStoreCurrentTime(st);
@@ -133,12 +180,19 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   // setSeekTime(t) — the transcript, the timeline scrubber, etc. — moves
   // the video here. We consume it back to null so the same time can be
   // re-issued (e.g. clicking the same word twice still seeks).
+  //
+  // STRICT DELETION: if the requested time falls inside a deleted region
+  // (e.g. user clicked a struck-through word in the transcript), snap to
+  // the start of the next kept range instead. The playhead must never park
+  // inside a cut — otherwise pressing play would briefly leak the deleted
+  // audio before the rAF skip fires.
   useEffect(() => {
     if (seekTime === null) return;
     if (videoRef.current) {
-      videoRef.current.currentTime = seekTime;
-      setSourceTime(seekTime);
-      setStoreCurrentTime(seekTime);
+      const target = snapToKept(seekTime, editMapRef.current);
+      videoRef.current.currentTime = target;
+      setSourceTime(target);
+      setStoreCurrentTime(target);
     }
     setSeekTime(null);
   }, [seekTime, setSeekTime, setStoreCurrentTime]);

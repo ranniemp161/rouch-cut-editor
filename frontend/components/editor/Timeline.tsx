@@ -59,6 +59,7 @@ export function Timeline() {
   const deletedWordIds = useEditorStore((s) => s.deletedWordIds);
   const segments = useEditorStore((s) => s.segments);
   const splitMarkers = useEditorStore((s) => s.splitMarkers);
+  const clipTrims = useEditorStore((s) => s.clipTrims);
   const selectedWordIds = useEditorStore((s) => s.selectedWordIds);
   const lastClickedIndex = useEditorStore((s) => s.lastClickedIndex);
   const setSelectedWords = useEditorStore((s) => s.setSelectedWords);
@@ -77,17 +78,34 @@ export function Timeline() {
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [rangeSelection, setRangeSelection] = useState<RangeSelection | null>(null);
   const [zoom, setZoom] = useState(1);
+  // Source-time of the active snap target during a trim drag, or null when
+  // the cursor is between snap candidates. Drives the cyan guide line.
+  const [snapGuide, setSnapGuide] = useState<number | null>(null);
   const pendingZoomCursor = useRef<{ time: number; cursorX: number } | null>(null);
 
   const menu = useContextMenu();
 
   // ── Edit map: source ↔ edited mapping ─────────────────────────────────────
   const editMap = useMemo(
-    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration),
-    [transcript, deletedWordIds, segments, sourceDuration],
+    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
+    [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
   );
   const editedDuration = editMap.editedDuration;
   const canRender = editedDuration > 0;
+
+  // Diagnostic readout: total cut duration and trim entry count. If the user
+  // can't see deletions taking effect, this surfaces whether the edit map
+  // actually contains them — and whether stale per-clip pads are swallowing
+  // them. Renders as a tiny mono badge in the toolbar.
+  const cutStats = useMemo(() => {
+    let totalCutS = 0;
+    for (const r of editMap.deletedRegions) totalCutS += r.end - r.start;
+    return {
+      regions: editMap.deletedRegions.length,
+      totalS: totalCutS,
+      trims: Object.keys(clipTrims).length,
+    };
+  }, [editMap, clipTrims]);
 
   // Live edited-duration handle for the trim-drag handler — that handler runs
   // on pointermove and needs the *current* pxPerSec, not the value at
@@ -152,12 +170,20 @@ export function Timeline() {
           editedStart: range.editedStart + (subStart - range.sourceStart),
           editedEnd: range.editedStart + (subEnd - range.sourceStart),
         };
+        // Include EVERY transcript word whose start lies inside the sub-clip,
+        // regardless of deletion state. The deletion filter we used to apply
+        // here turned trim-extended kept ranges into "phantom clips" with no
+        // wordIds — right-click → Delete on those silently failed because
+        // bulkToggleWords was called with []. Including the deleted words
+        // means Delete/Restore always has something to act on; the actual
+        // visible state of each word is still driven by deletedWordIds in
+        // the transcript sidebar and the player skip.
         const ids: string[] = [];
         let anchor = -1;
         let j = wi;
         while (j < transcript.length && transcript[j].start < subEnd) {
           const w = transcript[j];
-          if (w.start >= subStart && !deletedWordIds.has(w.id)) {
+          if (w.start >= subStart) {
             ids.push(w.id);
             if (anchor === -1) anchor = j;
           }
@@ -289,17 +315,40 @@ export function Timeline() {
     [menu, selectedWordIds, setLastClickedIndex, setSelectedWords],
   );
 
+  // Drop any clipTrim entries anchored to one of the given word IDs. Called
+  // on every deletion path. Without this, a Delete on a trim-extended
+  // phantom clip would toggle the words but leave the pad in place — the
+  // kept range would persist (extension still active) and the clip would
+  // continue to play, exactly the "deleted but still in timeline" bug.
+  const clearTrimsForIds = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    const currentTrims = useEditorStore.getState().clipTrims;
+    const trimKeys = Object.keys(currentTrims);
+    if (trimKeys.length === 0) return;
+    const idSet = new Set(ids);
+    let mutated = false;
+    const next = { ...currentTrims };
+    for (const k of trimKeys) {
+      if (idSet.has(k)) {
+        delete next[k];
+        mutated = true;
+      }
+    }
+    if (mutated) useEditorStore.setState({ clipTrims: next });
+  }, []);
+
   const applyAndClose = useCallback(
     (isDeleted: boolean) => {
       const ids = Array.from(selectedWordIds);
       if (ids.length > 0) {
         pushHistory();
         bulkToggleWords(ids, isDeleted);
+        if (isDeleted) clearTrimsForIds(ids);
       }
       setSelectedWords(new Set());
       menu.close();
     },
-    [bulkToggleWords, menu, pushHistory, selectedWordIds, setSelectedWords],
+    [bulkToggleWords, clearTrimsForIds, menu, pushHistory, selectedWordIds, setSelectedWords],
   );
 
   // ── Marquee — edited-time range, mapped back to source words ──────────────
@@ -464,8 +513,10 @@ export function Timeline() {
       if (e.key === "Backspace" || e.key === "Delete") {
         if (state.selectedWordIds.size === 0) return;
         e.preventDefault();
+        const delIds = Array.from(state.selectedWordIds);
         pushHistory();
-        bulkToggleWords(Array.from(state.selectedWordIds), true);
+        bulkToggleWords(delIds, true);
+        clearTrimsForIds(delIds);
         setSelectedWords(new Set());
         setRangeSelection(null);
         return;
@@ -497,6 +548,7 @@ export function Timeline() {
         }
         pushHistory();
         bulkToggleWords(ids, true);
+        clearTrimsForIds(ids);
         setSelectedWords(new Set());
         if (k === "w" && lastEnd > 0) setSeekTime(lastEnd);
         return;
@@ -521,6 +573,7 @@ export function Timeline() {
       if (ids.length > 0) {
         pushHistory();
         bulkToggleWords(ids, true);
+        clearTrimsForIds(ids);
       }
       // Q: snap to the boundary of the new cut (i.e. `prev`), never to 0:00.
       // The source-time playhead stays where it was — the edited-time view
@@ -529,7 +582,7 @@ export function Timeline() {
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap, pushHistory, undo, redo]);
+  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap, pushHistory, undo, redo, clearTrimsForIds]);
 
   // ── Ruler ticks (in edited-time) ──────────────────────────────────────────
   const rulerTicks = useMemo(() => {
@@ -560,6 +613,28 @@ export function Timeline() {
           >
             {formatTC(editedDuration)} / {formatTC(sourceDuration)}
           </span>
+        )}
+        {canRender && (
+          <span
+            className="text-[10px] font-mono text-zinc-500 tabular-nums"
+            title="Cut regions • total cut seconds • per-clip trim entries"
+          >
+            {cutStats.regions}c · {cutStats.totalS.toFixed(1)}s · {cutStats.trims}t
+          </span>
+        )}
+        {cutStats.trims > 0 && (
+          <button
+            onClick={() => {
+              if (confirm(`Reset all ${cutStats.trims} per-clip trims? This restores every clip's edges to their natural word boundaries.`)) {
+                pushHistory();
+                useEditorStore.setState({ clipTrims: {} });
+              }
+            }}
+            className="text-[10px] px-1.5 h-5 rounded bg-zinc-800/80 hover:bg-zinc-700 text-zinc-400 hover:text-amber-300 transition-colors"
+            title="Clear all per-clip edge trims (use when stale pads are masking deletions)"
+          >
+            Reset trims
+          </button>
         )}
         <button
           onClick={() => zoomBy(1 / ZOOM_STEP)}
@@ -634,6 +709,7 @@ export function Timeline() {
               tone="video"
               onClipClick={handleClipClick}
               onClipContextMenu={handleClipContextMenu}
+              onSnapChange={setSnapGuide}
             />
             <TrackLane
               label="A1"
@@ -647,7 +723,19 @@ export function Timeline() {
               tone="audio"
               onClipClick={handleClipClick}
               onClipContextMenu={handleClipContextMenu}
+              onSnapChange={setSnapGuide}
             />
+
+            {snapGuide !== null && canRender && (() => {
+              const editedSnap = sourceToEdited(snapGuide, editMap);
+              if (editedSnap === null) return null;
+              return (
+                <div
+                  className="absolute top-0 bottom-0 w-px bg-cyan-400 z-40 pointer-events-none shadow-[0_0_6px_rgba(34,211,238,0.9)]"
+                  style={{ left: `${(editedSnap / editedDuration) * 100}%` }}
+                />
+              );
+            })()}
 
             {canRender &&
               visibleSplitMarkers.map((time, idx) => (
@@ -751,11 +839,12 @@ interface TrackLaneProps {
   tone: "video" | "audio";
   onClipClick: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
   onClipContextMenu: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
+  onSnapChange: (sourceTime: number | null) => void;
 }
 
 function TrackLane({
   label, top, canRender, editedDuration, editedDurationRef, clips, clipLimits, selectedWordIds, tone,
-  onClipClick, onClipContextMenu,
+  onClipClick, onClipContextMenu, onSnapChange,
 }: TrackLaneProps) {
   return (
     <div className="absolute left-0 right-0" style={{ top, height: LANE_HEIGHT }}>
@@ -766,7 +855,7 @@ function TrackLane({
       {canRender &&
         clips.map((clip, i) => (
           <ClipBlock
-            key={`${tone}-${clip.range.editedStart}`}
+            key={`${tone}-${clip.range.sourceStart}-${clip.range.sourceEnd}-${i}`}
             clip={clip}
             editedDuration={editedDuration}
             editedDurationRef={editedDurationRef}
@@ -776,6 +865,7 @@ function TrackLane({
             isFirst={i === 0}
             onClick={onClipClick}
             onContextMenu={onClipContextMenu}
+            onSnapChange={onSnapChange}
           />
         ))}
     </div>
@@ -796,10 +886,11 @@ interface ClipBlockProps {
   isFirst: boolean;
   onClick: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
   onContextMenu: (e: ReactMouseEvent<HTMLDivElement>, clip: Clip) => void;
+  onSnapChange: (sourceTime: number | null) => void;
 }
 
 function ClipBlock({
-  clip, editedDuration, editedDurationRef, limits, isSelected, tone, isFirst, onClick, onContextMenu,
+  clip, editedDuration, editedDurationRef, limits, isSelected, tone, isFirst, onClick, onContextMenu, onSnapChange,
 }: ClipBlockProps) {
   const styleClasses =
     tone === "video"
@@ -807,10 +898,36 @@ function ClipBlock({
       : "bg-emerald-600/70 hover:bg-emerald-500/90";
   const selectedRing = isSelected
     ? " ring-2 ring-white/95 shadow-[0_0_0_1px_rgba(168,85,247,0.5)] z-10"
-    : "";
+    : " hover:ring-1 hover:ring-white/60 hover:z-10";
   const seam = isFirst ? "" : " border-l border-zinc-950/70";
 
   const clipRef = useRef<HTMLDivElement | null>(null);
+
+  // Duration shown in the hover tooltip — helps users decide whether a tiny
+  // sliver is worth keeping. Sub-second clips display in ms.
+  const durationS = clip.range.sourceEnd - clip.range.sourceStart;
+  const durationLabel = durationS < 1
+    ? `${Math.round(durationS * 1000)} ms`
+    : `${durationS.toFixed(2)} s`;
+
+  // Measure actual rendered pixel width so we can hide trim handles on
+  // clips too narrow for them to coexist with a clickable body. Without
+  // this, a 6px clip is 100% trim-handle and the user can never *select*
+  // it — only accidentally trim it. Matches CapCut: tiny clips are
+  // body-only; zoom in to expose handles.
+  const [hasRoomForHandles, setHasRoomForHandles] = useState(true);
+  useEffect(() => {
+    const el = clipRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? 0;
+      // 24px = 10px-each handles + 4px center body. Below that, body
+      // selection wins; user must zoom in to trim.
+      setHasRoomForHandles(w >= 24);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Edge trim drag — extends/shrinks the clip's source-time bounds.
   // To restore content fully (CapCut-style "pull the clip out of its trim"),
@@ -838,6 +955,37 @@ function ClipBlock({
       const clipMinSrc = clip.range.sourceStart;
       const clipMaxSrc = clip.range.sourceEnd;
 
+      // Anchor word for this clip's trim record. We pick the first surviving
+      // word inside the clip at pointerdown — it's stable for the lifetime
+      // of the drag (and survives through buildEditMap's lookup, which
+      // matches trim entries by word.start within the natural kept range).
+      let anchorId: string | null = null;
+      for (const w of transcriptSnap) {
+        if (
+          w.start >= clipMinSrc &&
+          w.start < clipMaxSrc &&
+          !baselineDeleted.has(w.id)
+        ) {
+          anchorId = w.id;
+          break;
+        }
+      }
+      const baselineTrim =
+        (anchorId && useEditorStore.getState().clipTrims[anchorId]) ||
+        { padStart: 0, padEnd: 0 };
+
+      // Snap target: the outward neighbour-clip edge for *this* handle only.
+      // On the right handle that's limits.rightLimit (anything past the
+      // clip's natural end); on the left it's limits.leftLimit. Including
+      // both edges would let a seam clip's "no-op limit" (which equals the
+      // clip's opposite edge) yank the cursor across initSrc and invert
+      // the drag — a click on the right handle of a small seam clip would
+      // snap target back to sourceStart and delete the entire clip.
+      // Word boundaries are intentionally excluded so sub-word pads stay
+      // smooth; the pad system collapses to zero on word-aligned releases.
+      const snapEdge = side === "right" ? limits.rightLimit : limits.leftLimit;
+      const SNAP_PX = 8;
+
       // One history entry per drag (not per pointermove). Pushed before the
       // first mutation so undo restores the pre-drag state.
       useEditorStore.getState().pushHistory();
@@ -858,6 +1006,22 @@ function ClipBlock({
             ? Math.max(target, limits.leftLimit)
             : Math.min(target, clipMaxSrc);
         }
+
+        // Magnetic snap to the outward neighbour edge. Only fires when the
+        // candidate is on the same side of initSrc as the current drag
+        // (i.e. an outward-extending drag can snap to an outward edge,
+        // never to one behind the handle). Threshold is in pixels so it
+        // tightens automatically as the user zooms in.
+        const snapTol = SNAP_PX / pxPerSec;
+        const candidateOutward = side === "right"
+          ? snapEdge >= initSrc
+          : snapEdge <= initSrc;
+        let snapped: number | null = null;
+        if (candidateOutward && Math.abs(snapEdge - target) <= snapTol) {
+          snapped = snapEdge;
+          target = snapped;
+        }
+        onSnapChange(snapped);
 
         // The source-time interval covered by this drag. `restoring` true
         // means the user dragged outward into the dead zone; false means
@@ -891,10 +1055,54 @@ function ClipBlock({
           if (mutated) nextSegments = updated;
         }
 
-        useEditorStore.setState({ deletedWordIds: nextDeleted, segments: nextSegments });
+        // Compute the kept range's *natural* boundary on the dragged side
+        // after applying nextDeleted. The residual between target and that
+        // boundary is the sub-word pad — the missing 30–150ms that lets
+        // users catch a breath or trim a hard consonant without restoring
+        // a whole word. Anything that aligns with a word boundary collapses
+        // pad to ~0 and the entry is dropped by setClipTrim.
+        let firstStart = Infinity;
+        let lastEnd = -Infinity;
+        for (const w of transcriptSnap) {
+          if (nextDeleted.has(w.id)) continue;
+          if (w.start < limits.leftLimit || w.start >= limits.rightLimit) continue;
+          if (w.start < firstStart) firstStart = w.start;
+          if (w.end > lastEnd) lastEnd = w.end;
+        }
+        if (firstStart === Infinity) firstStart = clipMinSrc;
+        if (lastEnd === -Infinity) lastEnd = clipMaxSrc;
+
+        const nextTrim =
+          side === "right"
+            ? { padStart: baselineTrim.padStart, padEnd: target - lastEnd }
+            : { padStart: target - firstStart, padEnd: baselineTrim.padEnd };
+
+        // Bundle all three updates into one setState so React batches the
+        // re-render — avoids a flicker between the deletion + trim writes.
+        const store = useEditorStore.getState();
+        let nextTrims = store.clipTrims;
+        if (anchorId) {
+          const collapse =
+            Math.abs(nextTrim.padStart) < 0.0005 &&
+            Math.abs(nextTrim.padEnd) < 0.0005;
+          if (collapse) {
+            if (anchorId in nextTrims) {
+              nextTrims = { ...nextTrims };
+              delete nextTrims[anchorId];
+            }
+          } else {
+            nextTrims = { ...nextTrims, [anchorId]: nextTrim };
+          }
+        }
+        useEditorStore.setState({
+          deletedWordIds: nextDeleted,
+          segments: nextSegments,
+          clipTrims: nextTrims,
+        });
       };
 
       const onUp = () => {
+        onSnapChange(null);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
         window.removeEventListener("pointercancel", onUp);
@@ -903,34 +1111,51 @@ function ClipBlock({
       window.addEventListener("pointerup", onUp);
       window.addEventListener("pointercancel", onUp);
     },
-    [clip, editedDuration, editedDurationRef, limits],
+    [clip, editedDuration, editedDurationRef, limits, onSnapChange],
   );
+
+  // Show trim handles when: clip is wide enough AND (selected OR hovered).
+  // Body click is therefore the default action — handles are an opt-in
+  // affordance the user has to deliberately reach for.
+  const showHandles = hasRoomForHandles;
 
   return (
     <div
       ref={clipRef}
-      className={`absolute top-1.5 bottom-1.5 cursor-grab active:cursor-grabbing rounded-[2px] transition-colors duration-75 ${styleClasses}${selectedRing}${seam}`}
+      title={`${durationLabel}  •  click to select, right-click for options`}
+      className={`group absolute top-1.5 bottom-1.5 cursor-pointer active:cursor-grabbing rounded-[2px] transition-all duration-75 ${styleClasses}${selectedRing}${seam}`}
       style={{
         left: `${(clip.range.editedStart / editedDuration) * 100}%`,
         width: `${((clip.range.editedEnd - clip.range.editedStart) / editedDuration) * 100}%`,
+        minWidth: 3,
       }}
       onPointerDown={(e) => e.stopPropagation()}
       onClick={(e) => onClick(e, clip)}
       onContextMenu={(e) => onContextMenu(e, clip)}
     >
-      {/* Edge trim hot zones — 4px wide. Pointerdown enters a drag that
-          restores (outward) or removes (inward) words by mutating
-          deletedWordIds in real time. */}
-      <div
-        className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize z-20"
-        onPointerDown={(e) => handleEdgePointerDown(e, "left")}
-        onClick={(e) => e.stopPropagation()}
-      />
-      <div
-        className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize z-20"
-        onPointerDown={(e) => handleEdgePointerDown(e, "right")}
-        onClick={(e) => e.stopPropagation()}
-      />
+      {/* Edge trim handles — 6px wide, only interactive on hover or when
+          selected. Hidden entirely on tiny clips so the body remains
+          clickable (zoom in with Ctrl+wheel to expose them). */}
+      {showHandles && (
+        <>
+          <div
+            className={`absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 transition-opacity duration-100
+                        ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
+            onPointerDown={(e) => handleEdgePointerDown(e, "left")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="absolute inset-y-1 left-0 w-[3px] rounded-r-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
+          </div>
+          <div
+            className={`absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 transition-opacity duration-100
+                        ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
+            onPointerDown={(e) => handleEdgePointerDown(e, "right")}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="absolute inset-y-1 right-0 w-[3px] rounded-l-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
+          </div>
+        </>
+      )}
     </div>
   );
 }

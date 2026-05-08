@@ -70,6 +70,7 @@ export default function MainEditor() {
     let lastDel: Set<string> | null = null;
     let lastSegs: unknown = null;
     let lastSplits: unknown = null;
+    let lastTrims: unknown = null;
 
     const unsubscribe = useEditorStore.subscribe((state) => {
       const tid = state.transcriptId;
@@ -79,11 +80,13 @@ export default function MainEditor() {
       if (
         state.deletedWordIds === lastDel &&
         state.segments === lastSegs &&
-        state.splitMarkers === lastSplits
+        state.splitMarkers === lastSplits &&
+        state.clipTrims === lastTrims
       ) return;
       lastDel = state.deletedWordIds;
       lastSegs = state.segments;
       lastSplits = state.splitMarkers;
+      lastTrims = state.clipTrims;
 
       if (raf) cancelAnimationFrame(raf);
       raf = requestAnimationFrame(() => {
@@ -91,6 +94,7 @@ export default function MainEditor() {
           deletedWordIds: state.deletedWordIds,
           segments: state.segments,
           splitMarkers: state.splitMarkers,
+          clipTrims: state.clipTrims,
         });
       });
     });

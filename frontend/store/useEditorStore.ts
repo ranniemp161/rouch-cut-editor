@@ -22,6 +22,16 @@ export interface TranscriptSegment {
   isCut: boolean;
 }
 
+// Per-clip sub-word edge nudges in seconds. padStart is added to the clip's
+// natural sourceStart (negative pulls the edge earlier — restoring a few
+// frames of breath before a word); padEnd is added to the natural sourceEnd
+// (positive extends past the consonant tail). Keyed by an anchor word ID
+// belonging to the clip — see Timeline's trim-drag handler for the rule.
+export interface ClipTrim {
+  padStart: number;
+  padEnd: number;
+}
+
 /**
  * Snapshot of just the user-editable fields. Selection / playhead / history
  * itself stay out — undo should not move the cursor or wipe what's selected.
@@ -30,6 +40,7 @@ interface EditSnapshot {
   deletedWordIds: Set<string>;
   segments: TranscriptSegment[];
   splitMarkers: number[];
+  clipTrims: Record<string, ClipTrim>;
 }
 
 const HISTORY_LIMIT = 50;
@@ -71,6 +82,7 @@ interface EditorStore {
   seekTime: number | null;
   currentTime: number;
   splitMarkers: number[];
+  clipTrims: Record<string, ClipTrim>;
 
   // ── Undo / redo (snapshot-based) ──────────────────────────────────────────
   historyStack: EditSnapshot[];
@@ -103,6 +115,8 @@ interface EditorStore {
   addSplitMarker: (time: number) => void;
   removeSplitMarker: (time: number) => void;
   clearSplitMarkers: () => void;
+  setClipTrim: (anchorId: string, trim: ClipTrim) => void;
+  clearClipTrim: (anchorId: string) => void;
 
   // History
   pushHistory: () => void;
@@ -152,6 +166,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
   seekTime: null,
   currentTime: 0,
   splitMarkers: [],
+  clipTrims: {},
 
   historyStack: [],
   futureStack: [],
@@ -186,6 +201,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       seekTime: null,
       currentTime: 0,
       splitMarkers: [],
+      clipTrims: {},
       historyStack: [],
       futureStack: [],
     });
@@ -224,6 +240,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
     let deletedWordIds = new Set<string>(meta.initialDeletedIds);
     let finalSegments = segments;
     let finalSplitMarkers: number[] = [];
+    let finalClipTrims: Record<string, ClipTrim> = {};
 
     // Restore the user's prior session for this transcript if one exists.
     // Keyed by transcriptId so each project has its own saved edit state.
@@ -241,6 +258,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
           return found ? { ...s, isCut: found.isCut } : s;
         });
         finalSplitMarkers = saved.splitMarkers;
+        finalClipTrims = saved.clipTrims ?? {};
       }
     }
 
@@ -250,6 +268,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       transcript,
       deletedWordIds,
       splitMarkers: finalSplitMarkers,
+      clipTrims: finalClipTrims,
       frameRate: meta.frameRate,
       totalFrames: meta.totalFrames,
       durationSeconds: meta.durationSeconds,
@@ -287,6 +306,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       seekTime: null,
       currentTime: 0,
       splitMarkers: [],
+      clipTrims: {},
       historyStack: [],
       futureStack: [],
     }),
@@ -311,6 +331,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       seekTime: null,
       currentTime: 0,
       splitMarkers: [],
+      clipTrims: {},
       historyStack: [],
       futureStack: [],
     }),
@@ -320,7 +341,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
   // Mutating in-place would not trigger subscribed components to re-render.
 
   setTranscript: (words) =>
-    set({ transcript: words, deletedWordIds: new Set<string>() }),
+    set({ transcript: words, deletedWordIds: new Set<string>(), clipTrims: {} }),
 
   toggleWordState: (wordId) =>
     set((s) => {
@@ -371,6 +392,27 @@ export const useEditorStore = create<EditorStore>((set) => ({
 
   clearSplitMarkers: () => set({ splitMarkers: [] }),
 
+  setClipTrim: (anchorId, trim) =>
+    set((s) => {
+      // Drop the entry entirely when both pads collapse to ~0 — keeps the
+      // record sparse so unrelated lookups stay fast.
+      if (Math.abs(trim.padStart) < 0.0005 && Math.abs(trim.padEnd) < 0.0005) {
+        if (!(anchorId in s.clipTrims)) return s;
+        const next = { ...s.clipTrims };
+        delete next[anchorId];
+        return { clipTrims: next };
+      }
+      return { clipTrims: { ...s.clipTrims, [anchorId]: trim } };
+    }),
+
+  clearClipTrim: (anchorId) =>
+    set((s) => {
+      if (!(anchorId in s.clipTrims)) return s;
+      const next = { ...s.clipTrims };
+      delete next[anchorId];
+      return { clipTrims: next };
+    }),
+
   // ── History ───────────────────────────────────────────────────────────────
   // Snapshot the three editable fields. Callers invoke pushHistory() *before*
   // the mutation, so an undo can restore exactly the prior state.
@@ -381,6 +423,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
         deletedWordIds: new Set(s.deletedWordIds),
         segments: s.segments.map((seg) => ({ ...seg })),
         splitMarkers: [...s.splitMarkers],
+        clipTrims: { ...s.clipTrims },
       };
       const next = [...s.historyStack, snap];
       // Bound memory — drop the oldest entry once the cap is hit. 50 is
@@ -397,6 +440,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
         deletedWordIds: new Set(s.deletedWordIds),
         segments: s.segments.map((seg) => ({ ...seg })),
         splitMarkers: [...s.splitMarkers],
+        clipTrims: { ...s.clipTrims },
       };
       return {
         historyStack: s.historyStack.slice(0, -1),
@@ -404,6 +448,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
         deletedWordIds: prev.deletedWordIds,
         segments: prev.segments,
         splitMarkers: prev.splitMarkers,
+        clipTrims: prev.clipTrims,
       };
     }),
 
@@ -415,6 +460,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
         deletedWordIds: new Set(s.deletedWordIds),
         segments: s.segments.map((seg) => ({ ...seg })),
         splitMarkers: [...s.splitMarkers],
+        clipTrims: { ...s.clipTrims },
       };
       return {
         futureStack: s.futureStack.slice(0, -1),
@@ -422,6 +468,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
         deletedWordIds: next.deletedWordIds,
         segments: next.segments,
         splitMarkers: next.splitMarkers,
+        clipTrims: next.clipTrims,
       };
     }),
 
