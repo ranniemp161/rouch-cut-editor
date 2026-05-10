@@ -32,6 +32,20 @@ export interface ClipTrim {
   padEnd: number;
 }
 
+// Clip-object model (CapCut-style). A clip is a window into the original
+// 15-min source: `[sourceStart, sourceEnd]` are seconds into the imported
+// media. The timeline plays clips in array order, packed end-to-end
+// (single-track, ripple-by-default) — `timelinePosition` is therefore
+// derived from the cumulative duration of preceding clips and is NOT
+// stored. Operations are direct mutations of these two numbers; the old
+// `deletedWordIds + segments + splitMarkers + clipTrims` quadruple is
+// being phased out in favour of this single source of truth.
+export interface Clip {
+  id: string;
+  sourceStart: number;
+  sourceEnd: number;
+}
+
 /**
  * Snapshot of just the user-editable fields. Selection / playhead / history
  * itself stay out — undo should not move the cursor or wipe what's selected.
@@ -83,6 +97,12 @@ interface EditorStore {
   currentTime: number;
   splitMarkers: number[];
   clipTrims: Record<string, ClipTrim>;
+
+  // ── Clip-object model (in migration) ─────────────────────────────────────
+  // Source-of-truth for the new architecture. Initially generated from the
+  // AI rough-cut at setAnalysis; future Timeline/Player will read from this
+  // directly instead of reconstructing kept ranges via buildEditMap.
+  clips: Clip[];
 
   // ── Timeline UX state ────────────────────────────────────────────────────
   // Magnetic timeline: when true, deletions ripple-close (default Descript
@@ -176,6 +196,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
   currentTime: 0,
   splitMarkers: [],
   clipTrims: {},
+  clips: [],
   magneticTimeline: true,
 
   historyStack: [],
@@ -212,6 +233,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       currentTime: 0,
       splitMarkers: [],
       clipTrims: {},
+      clips: [],
       historyStack: [],
       futureStack: [],
     });
@@ -273,6 +295,20 @@ export const useEditorStore = create<EditorStore>((set) => ({
       }
     }
 
+    // Derive the initial Clip array from the AI rough-cut. Walk the
+    // source timeline and record every span that ISN'T inside a deleted
+    // word's range or an isCut segment. This is the same kept-region
+    // logic that buildEditMap step 1-4 used to compute on the fly — but
+    // baked once into a real array of objects that subsequent edits will
+    // mutate directly. Adjacent regions are merged with a small tolerance
+    // so a kept sliver of a few ms doesn't produce a tiny garbage clip.
+    const initialClips: Clip[] = deriveInitialClips(
+      transcript,
+      deletedWordIds,
+      finalSegments,
+      meta.durationSeconds,
+    );
+
     set({
       analysisWords: words,
       segments: finalSegments,
@@ -280,6 +316,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       deletedWordIds,
       splitMarkers: finalSplitMarkers,
       clipTrims: finalClipTrims,
+      clips: initialClips,
       frameRate: meta.frameRate,
       totalFrames: meta.totalFrames,
       durationSeconds: meta.durationSeconds,
@@ -318,6 +355,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       currentTime: 0,
       splitMarkers: [],
       clipTrims: {},
+      clips: [],
       historyStack: [],
       futureStack: [],
     }),
@@ -343,6 +381,7 @@ export const useEditorStore = create<EditorStore>((set) => ({
       currentTime: 0,
       splitMarkers: [],
       clipTrims: {},
+      clips: [],
       historyStack: [],
       futureStack: [],
     }),
@@ -523,6 +562,89 @@ export const useEditorStore = create<EditorStore>((set) => ({
 
   clearHistory: () => set({ historyStack: [], futureStack: [] }),
 }));
+
+// ---------------------------------------------------------------------------
+// Initial clip generation
+// ---------------------------------------------------------------------------
+
+// Tolerances tuned to swallow noise from Whisper's loose word boundaries.
+// MERGE: two deletions whose gap is below this collapse into one. MIN_KEPT:
+// any leftover sliver shorter than this is absorbed into the surrounding
+// deletion (a 30ms half-phoneme is inaudible content but a real splice
+// point during playback). Both numbers match the constants buildEditMap
+// has used since v1, so the initial clip layout is bit-for-bit equivalent
+// to what the timeline currently renders.
+const CLIP_MERGE_TOL_S = 0.05;
+const CLIP_MIN_KEPT_S = 0.12;
+
+function deriveInitialClips(
+  transcript: WordTimestamp[],
+  deletedWordIds: Set<string>,
+  segments: TranscriptSegment[],
+  sourceDuration: number,
+): Clip[] {
+  if (sourceDuration <= 0) return [];
+
+  // 1) Word-level deletions, merged into runs.
+  type Region = { start: number; end: number };
+  const regions: Region[] = [];
+  let cur: Region | null = null;
+  for (const w of transcript) {
+    if (!deletedWordIds.has(w.id)) {
+      if (cur) { regions.push(cur); cur = null; }
+      continue;
+    }
+    if (cur && w.start - cur.end <= CLIP_MERGE_TOL_S) {
+      cur.end = w.end;
+    } else {
+      if (cur) regions.push(cur);
+      cur = { start: w.start, end: w.end };
+    }
+  }
+  if (cur) regions.push(cur);
+
+  // 2) Fold in AI-cut segments.
+  for (const s of segments) if (s.isCut) regions.push({ start: s.startS, end: s.endS });
+
+  // 3) Sort + merge overlapping/adjacent.
+  regions.sort((a, b) => a.start - b.start);
+  const merged: Region[] = [];
+  for (const r of regions) {
+    const last = merged[merged.length - 1];
+    if (last && r.start <= last.end + 0.001) last.end = Math.max(last.end, r.end);
+    else merged.push({ start: r.start, end: r.end });
+  }
+
+  // 4) Absorb tiny kept slivers.
+  const collapsed: Region[] = [];
+  for (const r of merged) {
+    const last = collapsed[collapsed.length - 1];
+    if (last && r.start - last.end < CLIP_MIN_KEPT_S) last.end = Math.max(last.end, r.end);
+    else collapsed.push({ start: r.start, end: r.end });
+  }
+  if (collapsed.length > 0) {
+    if (collapsed[0].start > 0 && collapsed[0].start < CLIP_MIN_KEPT_S) collapsed[0].start = 0;
+    const tail = collapsed[collapsed.length - 1];
+    if (sourceDuration - tail.end > 0 && sourceDuration - tail.end < CLIP_MIN_KEPT_S) {
+      tail.end = sourceDuration;
+    }
+  }
+
+  // 5) Walk gaps as kept clips.
+  const clips: Clip[] = [];
+  let cursor = 0;
+  let n = 0;
+  for (const region of collapsed) {
+    if (region.start > cursor) {
+      clips.push({ id: `clip-${n++}`, sourceStart: cursor, sourceEnd: region.start });
+    }
+    cursor = Math.max(cursor, region.end);
+  }
+  if (cursor < sourceDuration) {
+    clips.push({ id: `clip-${n++}`, sourceStart: cursor, sourceEnd: sourceDuration });
+  }
+  return clips;
+}
 
 export const rehydrateAuth = () => {
   if (localStorage.getItem(LS_KEY) === "true") {
