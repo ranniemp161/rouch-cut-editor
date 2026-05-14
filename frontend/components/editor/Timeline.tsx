@@ -10,7 +10,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { Scissors, RotateCw, Minus, Plus, Magnet } from "lucide-react";
+import { Scissors, RotateCw, Minus, Plus, Magnet, Maximize2 } from "lucide-react";
 import { useEditorStore } from "@/store/useEditorStore";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import {
@@ -93,6 +93,11 @@ export function Timeline() {
   const [marquee, setMarquee] = useState<MarqueeRect | null>(null);
   const [rangeSelection, setRangeSelection] = useState<RangeSelection | null>(null);
   const [zoom, setZoom] = useState(1);
+  // Cursor-hover preview on the ruler. Stored as an edited-time value (null
+  // while the cursor is elsewhere). CapCut shows a faint guideline + tooltip
+  // wherever the cursor hovers the ruler so you can read the exact time
+  // before committing to a scrub.
+  const [hoverEdited, setHoverEdited] = useState<number | null>(null);
   // Source-time of the active snap target during a trim drag, or null when
   // the cursor is between snap candidates. Drives the cyan guide line.
   const [snapGuide, setSnapGuide] = useState<number | null>(null);
@@ -298,24 +303,83 @@ export function Timeline() {
     [editedDuration],
   );
 
-  const handleRulerPointerDown = useCallback(
-    (e: ReactPointerEvent<HTMLDivElement>) => {
+  // Edited-time positions of every cut boundary the playhead should snap to
+  // (kept-range edges + split markers). Used by both the ruler scrub and the
+  // direct playhead drag — Alt held during a drag disables snap, matching
+  // CapCut's "free scrub" override.
+  const SCRUB_SNAP_PX = 8;
+  const snapPlayhead = useCallback(
+    (et: number, alt: boolean): { et: number; snappedSource: number | null } => {
+      if (alt) return { et, snappedSource: null };
+      const rect = rulerRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || editedDuration <= 0) {
+        return { et, snappedSource: null };
+      }
+      const pxPerSec = rect.width / editedDuration;
+      const tolSec = SCRUB_SNAP_PX / pxPerSec;
+      let bestEt = et;
+      let bestSrc: number | null = null;
+      let bestDist = Infinity;
+      for (const c of cutBoundariesRef.current) {
+        const ce = sourceToEdited(c, editMap);
+        if (ce === null) continue;
+        const d = Math.abs(ce - et);
+        if (d < bestDist && d <= tolSec) {
+          bestDist = d;
+          bestEt = ce;
+          bestSrc = c;
+        }
+      }
+      return { et: bestEt, snappedSource: bestSrc };
+    },
+    [editMap, editedDuration],
+  );
+
+  // Shared scrub starter — used by both the ruler pointerdown and the
+  // playhead-head pointerdown. seekFromClientX=false means "enter scrub mode
+  // without jumping" (clicking the playhead itself shouldn't teleport it).
+  const startScrubbing = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>, seekFromClientX: boolean) => {
       if (e.button !== 0) return;
-      const et = editedTimeFromClientX(e.clientX);
-      if (et === null) return;
-      setSeekTime(editedToSource(et, editMap));
+      if (seekFromClientX) {
+        const et = editedTimeFromClientX(e.clientX);
+        if (et !== null) {
+          const { et: snappedEt, snappedSource } = snapPlayhead(et, e.altKey);
+          setSeekTime(editedToSource(snappedEt, editMap));
+          setSnapGuide(snappedSource);
+        }
+      }
       setIsScrubbing(true);
     },
-    [editMap, editedTimeFromClientX, setSeekTime],
+    [editMap, editedTimeFromClientX, setSeekTime, snapPlayhead],
+  );
+
+  const handleRulerPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => startScrubbing(e, true),
+    [startScrubbing],
+  );
+
+  const handlePlayheadPointerDown = useCallback(
+    (e: ReactPointerEvent<HTMLDivElement>) => {
+      e.stopPropagation();
+      startScrubbing(e, false);
+    },
+    [startScrubbing],
   );
 
   useEffect(() => {
     if (!isScrubbing) return;
     const onMove = (e: PointerEvent) => {
       const et = editedTimeFromClientX(e.clientX);
-      if (et !== null) setSeekTime(editedToSource(et, editMap));
+      if (et === null) return;
+      const { et: snappedEt, snappedSource } = snapPlayhead(et, e.altKey);
+      setSeekTime(editedToSource(snappedEt, editMap));
+      setSnapGuide(snappedSource);
     };
-    const onUp = () => setIsScrubbing(false);
+    const onUp = () => {
+      setIsScrubbing(false);
+      setSnapGuide(null);
+    };
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
     window.addEventListener("pointercancel", onUp);
@@ -324,7 +388,7 @@ export function Timeline() {
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
     };
-  }, [isScrubbing, editMap, editedTimeFromClientX, setSeekTime]);
+  }, [isScrubbing, editMap, editedTimeFromClientX, setSeekTime, snapPlayhead]);
 
   // ── Clip click + shift-click ──────────────────────────────────────────────
   const handleClipClick = useCallback(
@@ -485,6 +549,14 @@ export function Timeline() {
     setZoom((z) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z * factor)));
   }, []);
 
+  // Fit-to-window resets zoom to 1×, which makes the inner track div exactly
+  // span the viewport (width: `${zoom * 100}%`). Also zeros scroll so the
+  // start of the timeline is visible. Keyboard shortcut: Shift+Z.
+  const fitToWindow = useCallback(() => {
+    setZoom(1);
+    if (scrollRef.current) scrollRef.current.scrollLeft = 0;
+  }, []);
+
   // ── Cut boundaries in source-time (kept-range edges + split markers) ──────
   // Q/W ripple-delete uses these to find the previous/next "cut" relative
   // to the playhead. The list is sorted and deduped.
@@ -614,6 +686,14 @@ export function Timeline() {
         return;
       }
 
+      // Shift+Z — fit timeline to viewport. CapCut shortcut. Guarded above
+      // by the ctrl/meta+shift+z (redo) check so plain Shift+Z is safe.
+      if (e.shiftKey && k === "z") {
+        e.preventDefault();
+        fitToWindow();
+        return;
+      }
+
       // S — splice the active clip at the playhead.
       if (k === "s") {
         e.preventDefault();
@@ -674,17 +754,34 @@ export function Timeline() {
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap, pushHistory, undo, redo, clearTrimsForIds, setClipTrim, frameRate]);
+  }, [bulkToggleWords, setSeekTime, setSelectedWords, addSplitMarker, editMap, pushHistory, undo, redo, clearTrimsForIds, setClipTrim, frameRate, fitToWindow]);
 
   // ── Ruler ticks (in edited-time) ──────────────────────────────────────────
-  const rulerTicks = useMemo(() => {
-    if (!canRender) return [] as number[];
-    const target = 10 * zoom;
-    const step = Math.max(1, Math.round(editedDuration / target));
-    const out: number[] = [];
-    for (let t = 0; t <= editedDuration; t += step) out.push(t);
-    return out;
+  // Pick a "nice" step from a fixed ladder so labels stay round (1s, 0.5s,
+  // 0.1s, …) while density tracks zoom. The previous Math.round(... / target)
+  // floored at 1 s, which meant no sub-second grid at any zoom — a frame-
+  // level trim had no visual reference. Each tick carries a `major` flag so
+  // the renderer can de-emphasise mid-ticks at fine resolutions.
+  const rulerTickInfo = useMemo(() => {
+    if (!canRender) return { ticks: [] as { t: number; major: boolean }[], step: 1 };
+    const niceSteps = [60, 30, 15, 10, 5, 2, 1, 0.5, 0.2, 0.1, 0.05, 0.02, 0.01];
+    const targetCount = Math.max(6, Math.floor(10 * zoom));
+    const rough = editedDuration / targetCount;
+    let step = niceSteps[0];
+    for (const s of niceSteps) {
+      if (s <= rough) break;
+      step = s;
+    }
+    // Major every 5th tick, so the user always has a denser-but-readable
+    // grid: at 0.1s step, majors land on every 0.5s.
+    const ticks: { t: number; major: boolean }[] = [];
+    const eps = step * 0.001;
+    for (let i = 0; i * step <= editedDuration + eps; i++) {
+      ticks.push({ t: i * step, major: i % 5 === 0 });
+    }
+    return { ticks, step };
   }, [canRender, editedDuration, zoom]);
+  const rulerStep = rulerTickInfo.step;
 
   // Selection bounds in edited time — feeds the floating toolbar position.
   // Falls back across deleted words: if a selected word has been cut, its
@@ -805,6 +902,14 @@ export function Timeline() {
           <Magnet size={11} />
         </button>
         <button
+          onClick={fitToWindow}
+          disabled={zoom === ZOOM_MIN}
+          className="w-5 h-5 flex items-center justify-center rounded bg-zinc-800/80 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+          title="Fit to window (Shift+Z)"
+        >
+          <Maximize2 size={10} />
+        </button>
+        <button
           onClick={() => zoomBy(1 / ZOOM_STEP)}
           disabled={zoom <= ZOOM_MIN}
           className="w-5 h-5 flex items-center justify-center rounded bg-zinc-800/80 hover:bg-zinc-700 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
@@ -812,6 +917,23 @@ export function Timeline() {
         >
           <Minus size={11} />
         </button>
+        {/* Continuous zoom slider — log scale so the cursor moves with
+            perceived zoom rather than tracking the raw 1–20 linear range
+            (which spends ~50% of its travel between 10× and 20×). */}
+        <input
+          type="range"
+          min={0}
+          max={1000}
+          value={Math.round(
+            (Math.log(zoom / ZOOM_MIN) / Math.log(ZOOM_MAX / ZOOM_MIN)) * 1000,
+          )}
+          onChange={(e) => {
+            const t = Number(e.target.value) / 1000;
+            setZoom(ZOOM_MIN * Math.pow(ZOOM_MAX / ZOOM_MIN, t));
+          }}
+          className="w-20 h-1 accent-violet-400 cursor-ew-resize"
+          title="Zoom"
+        />
         <span className="text-[10px] font-mono w-10 text-center tabular-nums">
           {zoom.toFixed(1)}×
         </span>
@@ -842,24 +964,56 @@ export function Timeline() {
           <div
             ref={rulerRef}
             onPointerDown={handleRulerPointerDown}
+            onPointerMove={(e) => {
+              if (isScrubbing) return;
+              const et = editedTimeFromClientX(e.clientX);
+              if (et !== null) setHoverEdited(et);
+            }}
+            onPointerLeave={() => setHoverEdited(null)}
             className={`h-7 bg-zinc-900/40 backdrop-blur-md border-b border-violet-500/15 relative shrink-0 ${
               isScrubbing ? "cursor-grabbing" : "cursor-text"
             }`}
             style={{ touchAction: "none" }}
           >
             {canRender &&
-              rulerTicks.map((t) => (
+              rulerTickInfo.ticks.map(({ t, major }) => (
                 <div
                   key={t}
                   className="absolute top-0 bottom-0 pl-1.5 flex items-end pb-1 pointer-events-none"
                   style={{ left: `${(t / editedDuration) * 100}%` }}
                 >
-                  <div className="absolute left-0 top-2 bottom-1 w-px bg-zinc-800" />
-                  <span className="text-[10px] font-mono text-zinc-500 relative">
-                    {formatMMSS(t)}
-                  </span>
+                  <div
+                    className={`absolute left-0 w-px ${major ? "top-1.5 bottom-1 bg-zinc-700" : "top-3.5 bottom-1 bg-zinc-800"}`}
+                  />
+                  {major && (
+                    <span className="text-[10px] font-mono text-zinc-500 relative">
+                      {formatTick(t, rulerStep)}
+                    </span>
+                  )}
                 </div>
               ))}
+
+            {/* Hover preview — small tooltip showing the time the cursor
+                is over, with a faint guideline. Hidden during active scrub
+                (the scrub badge takes over there). */}
+            {hoverEdited !== null && !isScrubbing && canRender && (
+              <>
+                <div
+                  className="absolute top-0 bottom-0 w-px bg-zinc-400/40 pointer-events-none"
+                  style={{ left: `${(hoverEdited / editedDuration) * 100}%` }}
+                />
+                <div
+                  className="absolute -top-5 px-1.5 py-0.5 rounded
+                             bg-zinc-900/95 backdrop-blur-md border border-zinc-700
+                             text-[10px] font-mono text-zinc-300 tabular-nums
+                             whitespace-nowrap pointer-events-none shadow-lg
+                             -translate-x-1/2"
+                  style={{ left: `${(hoverEdited / editedDuration) * 100}%` }}
+                >
+                  {formatTC(hoverEdited)}
+                </div>
+              </>
+            )}
           </div>
 
           {/* Tracks */}
@@ -1006,19 +1160,32 @@ export function Timeline() {
           </div>
 
           {/* Playhead — diamond scrubber head + 1px line + floating timecode
-              while scrubbing (roadmap §2.2 Enhanced Playhead UI). */}
+              while scrubbing (roadmap §2.2 Enhanced Playhead UI). The outer
+              container is pointer-events:none so the playhead line never
+              eats clicks meant for clips beneath it; the diamond + a small
+              ruler-level grab band are the only interactive areas. */}
           {canRender && (
             <div
               className="absolute top-0 bottom-0 z-20 pointer-events-none"
               style={{ left: `${playheadPct}%`, transform: "translateX(-50%)" }}
             >
-              {/* Diamond cap: 10px square rotated 45°, sits half above the
-                  ruler so it reads as a grab-target rather than a pixel. */}
+              {/* Diamond cap: 16×16 hit area around a visible 10×10 diamond,
+                  so the head is forgiving to grab without forcing clip
+                  hit-targets to shrink. Cursor flips to grabbing while a
+                  scrub is active. */}
               <div
-                className="absolute left-1/2 -translate-x-1/2 -top-[3px] h-[10px] w-[10px]
-                           rotate-45 bg-violet-400 shadow-[0_0_8px_rgba(167,139,250,0.85)]
-                           ring-1 ring-violet-200/50"
-              />
+                onPointerDown={handlePlayheadPointerDown}
+                className={`absolute left-1/2 -translate-x-1/2 -top-[6px] w-[16px] h-[16px]
+                            pointer-events-auto flex items-center justify-center z-10
+                            ${isScrubbing ? "cursor-grabbing" : "cursor-grab"}`}
+                title="Drag to scrub · hold Alt to disable snap"
+              >
+                <div
+                  className="h-[10px] w-[10px] rotate-45 bg-violet-400
+                             shadow-[0_0_8px_rgba(167,139,250,0.85)]
+                             ring-1 ring-violet-200/50"
+                />
+              </div>
               <div className="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-px bg-violet-400/90" />
 
               {isScrubbing && (
@@ -1109,7 +1276,12 @@ function TrackLane({
       {canRender &&
         clips.map((clip, i) => (
           <ClipBlock
-            key={`${tone}-${clip.keptWordIds[0] ?? clip.range.sourceStart}-${i}`}
+            // Keyed on the clip's source-start (immutable for a trim drag) so
+            // edge dragging never remounts the component mid-gesture. Keying
+            // on keptWordIds[0] caused unmount/mount cycles whenever the
+            // first kept word toggled, resetting isDragging and re-firing the
+            // 220ms CSS transition.
+            key={`${tone}-${clip.range.sourceStart.toFixed(4)}-${i}`}
             clip={clip}
             editedDuration={editedDuration}
             editedDurationRef={editedDurationRef}
@@ -1264,13 +1436,14 @@ function ClipBlock({
           ? initLaneWidth / initEditedDuration
           : 0;
 
-      // Smallest clip the user can shrink to via a drag. 50ms keeps a tiny
-      // sliver visible so the user can still grab it (e.g. to undo or pull
-      // it back out) — without this margin, the kept range can collapse to
-      // zero and the clip disappears entirely, looking like a delete.
-      const MIN_DRAG_CLIP = 0.05;
+      // Smallest clip the user can shrink to via a drag. Raised from 50ms to
+      // 100ms — small enough not to prevent tight trims but large enough to
+      // stay visible at any zoom level, so the user always has a draggable
+      // sliver left after a destructive inward sweep.
+      const MIN_DRAG_CLIP = 0.10;
 
-      setIsDragging(true);
+      isDraggingRef.current = true;
+      setIsDraggingRender(true);
 
       let rafId: number | null = null;
       let pendingState: {
@@ -1291,24 +1464,18 @@ function ClipBlock({
         const pxPerSec = initPxPerSec;
         const dSec = (ev.clientX - startX) / pxPerSec;
         let target = initSrc + dSec;
-        // Inward-drag floor protects the anchor word so a) at least one word
-        // stays kept (the clip can't be drag-deleted) and b) the trim entry
-        // that buildEditMap looks up by anchor.id always lands inside a
-        // kept range. Right-handle inward sweeps from the right, so the
-        // anchor survives as long as `target > anchor.start`; left-handle
-        // sweeps from the left, so it needs `target < anchor.end`. The 1ms
-        // epsilon is what flips the deletion predicate to false. When a
-        // clip has no surviving words to begin with, the floor degrades to
-        // the size-only MIN_DRAG_CLIP cushion.
-        const EPS = 0.001;
-        const inwardFloorRight =
-          anchorId === null
-            ? clipMinSrc + MIN_DRAG_CLIP
-            : Math.max(clipMinSrc + MIN_DRAG_CLIP, anchorStart + EPS);
-        const inwardFloorLeft =
-          anchorId === null
-            ? clipMaxSrc - MIN_DRAG_CLIP
-            : Math.min(clipMaxSrc - MIN_DRAG_CLIP, anchorEnd - EPS);
+        // Inward-drag floors are computed from the clip's absolute source
+        // boundaries, NOT from the anchor word. The previous anchor-based
+        // floor was only 1ms past the anchor, so a very short anchor word
+        // near the clip edge let inward drags sweep past every other word
+        // before the floor kicked in — and on the next frame the anchor
+        // itself got deleted by `w.end <= hi`, collapsing the clip to zero.
+        // Anchoring the floor to clipMinSrc/clipMaxSrc + MIN_DRAG_CLIP makes
+        // it physically impossible for a trim drag to collapse the clip,
+        // regardless of where word boundaries fall. Anchor protection is
+        // enforced separately in the deletion loop below.
+        const inwardFloorRight = clipMinSrc + MIN_DRAG_CLIP;
+        const inwardFloorLeft = clipMaxSrc - MIN_DRAG_CLIP;
         if (side === "right") {
           target = target > initSrc
             ? Math.min(target, limits.rightLimit)
@@ -1341,13 +1508,39 @@ function ClipBlock({
         const lo = Math.min(initSrc, target);
         const hi = Math.max(initSrc, target);
         const restoring = side === "right" ? target > initSrc : target < initSrc;
+        // Drive the directional tint overlay. React 18 bails out on
+        // same-value setState (Object.is), so calling this every move is
+        // cheap — it only triggers a re-render when the direction actually
+        // flips.
+        setDragRestoring(restoring);
+
+        // Live duration + delta readout for the drag tooltip. The new clip
+        // bounds are [clipMinSrc, target] or [target, clipMaxSrc] depending
+        // on which edge moved; delta is signed against the pre-drag length.
+        const newDurationS =
+          side === "right" ? target - clipMinSrc : clipMaxSrc - target;
+        setDragInfo({
+          side,
+          durationS: newDurationS,
+          deltaS: newDurationS - (clipMaxSrc - clipMinSrc),
+        });
 
         const nextDeleted = new Set(baselineDeleted);
         for (const w of transcriptSnap) {
           // Words whose timestamps fall inside the dragged range.
           if (w.start >= lo && w.end <= hi) {
-            if (restoring) nextDeleted.delete(w.id);
-            else nextDeleted.add(w.id);
+            if (restoring) {
+              nextDeleted.delete(w.id);
+            } else {
+              // Never mark the anchor as deleted during a shrink drag.
+              // buildEditMap looks up this clip's trim entry by the anchor
+              // word's id; if it gets swept into the deletion set the trim
+              // record orphans and the clip's boundary is recomputed wrong
+              // on the next render. Explicit Delete (keyboard / context
+              // menu) still removes the anchor — this guard only fires on
+              // the trim-drag path.
+              if (w.id !== anchorId) nextDeleted.add(w.id);
+            }
           }
         }
 
@@ -1425,7 +1618,10 @@ function ClipBlock({
           rafId = null;
         }
         flush();
-        setIsDragging(false);
+        isDraggingRef.current = false;
+        setIsDraggingRender(false);
+        setDragRestoring(null);
+        setDragInfo(null);
         onSnapChange(null);
         window.removeEventListener("pointermove", onMove);
         window.removeEventListener("pointerup", onUp);
@@ -1467,7 +1663,27 @@ function ClipBlock({
   // the clip tracks the cursor pixel-for-pixel. Without this, the same easing
   // that makes post-edit ripple feel premium turns live drags into a
   // "rubbery" lag.
-  const [isDragging, setIsDragging] = useState(false);
+  //
+  // Stored as both a ref (survives StrictMode double-invocation and any
+  // edge-case remounts) and a state mirror (so the style object actually
+  // re-renders when drag flips on/off). Style reads from the state mirror.
+  const isDraggingRef = useRef(false);
+  const [isDraggingRender, setIsDraggingRender] = useState(false);
+
+  // Active drag direction overlay: null while idle, true while expanding
+  // (restoring content — green tint), false while shrinking (cutting more —
+  // red tint). Gives the user immediate, unambiguous feedback about what
+  // their drag will do, so a trim no longer looks identical to a delete.
+  const [dragRestoring, setDragRestoring] = useState<boolean | null>(null);
+
+  // Live trim readout: the new clip duration and signed delta vs the
+  // original. Rendered as a small badge above the dragged edge so the user
+  // sees exactly how much they're adding or trimming in real time.
+  const [dragInfo, setDragInfo] = useState<{
+    side: "left" | "right";
+    durationS: number;
+    deltaS: number;
+  } | null>(null);
 
   return (
     <div
@@ -1482,7 +1698,7 @@ function ClipBlock({
         width: `${((clip.range.editedEnd - clip.range.editedStart) / editedDuration) * 100}%`,
         minWidth: 3,
         transitionProperty: "left, width, background-color, box-shadow",
-        transitionDuration: isDragging ? "0ms" : "220ms, 220ms, 75ms, 75ms",
+        transitionDuration: isDraggingRender ? "0ms" : "220ms, 220ms, 75ms, 75ms",
         transitionTimingFunction: "cubic-bezier(0.22, 1, 0.36, 1)",
       }}
       onPointerDown={(e) => e.stopPropagation()}
@@ -1540,6 +1756,49 @@ function ClipBlock({
         </>
       )}
 
+      {/* Directional drag overlay — green while restoring (drag is adding
+          content back), red while shrinking (drag is cutting more). Mounted
+          only during an active edge drag, sits above thumbnails but below
+          handles and the mini-inspector. */}
+      {dragRestoring !== null && (
+        <div
+          className="absolute inset-0 pointer-events-none rounded-[2px] z-10"
+          style={{
+            background: dragRestoring
+              ? "rgba(52, 211, 153, 0.25)"
+              : "rgba(239, 68, 68, 0.20)",
+          }}
+        />
+      )}
+
+      {/* Live trim readout — shows new clip duration plus signed delta vs
+          the pre-drag length. Anchored to the dragged edge so it sits where
+          the user is already looking. Without this the user has no way to
+          tell, mid-drag, whether they've trimmed 50 ms or 500 ms. */}
+      {dragInfo && (
+        <div
+          className={`absolute -top-7 z-40 pointer-events-none px-1.5 py-0.5 rounded
+                      bg-zinc-900/95 backdrop-blur-md
+                      border border-violet-500/40 shadow-xl
+                      text-[10px] font-mono text-zinc-100 tabular-nums whitespace-nowrap`}
+          style={dragInfo.side === "right" ? { right: 0 } : { left: 0 }}
+        >
+          <span>
+            {dragInfo.durationS < 1
+              ? `${Math.round(dragInfo.durationS * 1000)} ms`
+              : `${dragInfo.durationS.toFixed(2)} s`}
+          </span>
+          <span
+            className={`ml-1.5 ${dragInfo.deltaS >= 0 ? "text-emerald-300" : "text-red-300"}`}
+          >
+            {dragInfo.deltaS >= 0 ? "+" : ""}
+            {Math.abs(dragInfo.deltaS) < 1
+              ? `${Math.round(dragInfo.deltaS * 1000)} ms`
+              : `${dragInfo.deltaS.toFixed(2)} s`}
+          </span>
+        </div>
+      )}
+
       {/* Mini-inspector — only mounted while hovered, suppressed during
           active selection so it doesn't fight the trim handles. */}
       {isHover && !isSelected && size.w >= 40 && (
@@ -1576,26 +1835,56 @@ function ClipBlock({
           right edge often hit the right clip's left handle instead. Dragging
           right then ran the inward-floor branch and silently deleted the
           right clip's leading words. */}
+      {/* Bracket-style trim handles. CapCut's hallmark: a clear white grip
+          that fills the full height of the clip on hover/select, so the
+          user always knows where the edge is. The 10px hit area sits over a
+          4px white inset bar (was 3px) and a tinted backdrop strip on
+          hover, which gives the eye a clear "this edge is grabbable" cue
+          without flashing the affordance on every clip the cursor passes. */}
       {showHandles && !limits.leftIsSeam && (
         <div
           className={`absolute left-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 transition-opacity duration-100
-                      ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
+                      ${isSelected || isDraggingRender
+                        ? "opacity-100"
+                        : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
           onPointerDown={(e) => handleEdgePointerDown(e, "left")}
           onClick={(e) => e.stopPropagation()}
           title="Drag to trim left edge · Shift+← extend · Shift+Alt+← shrink"
         >
-          <div className="absolute inset-y-1 left-0 w-[3px] rounded-r-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
+          <div className="absolute inset-y-0 left-0 w-2 bg-white/10 group-hover:bg-white/15" />
+          <div
+            className={`absolute inset-y-0 left-0 w-[4px] rounded-r-[2px] shadow-[0_0_6px_rgba(255,255,255,0.55)]
+                        ${isSelected || isDraggingRender ? "bg-white" : "bg-white/85"}`}
+          />
+          {/* Grip dots — two short vertical bars inside the bracket so the
+              handle reads as "drag me" rather than "decorative border". */}
+          <div className="absolute left-[2px] top-1/2 -translate-y-1/2 flex flex-col gap-[2px] pointer-events-none">
+            <div className="w-px h-1 bg-zinc-900/60" />
+            <div className="w-px h-1 bg-zinc-900/60" />
+            <div className="w-px h-1 bg-zinc-900/60" />
+          </div>
         </div>
       )}
       {showHandles && (
         <div
           className={`absolute right-0 top-0 bottom-0 w-2.5 cursor-ew-resize z-20 transition-opacity duration-100
-                      ${isSelected ? "opacity-100" : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
+                      ${isSelected || isDraggingRender
+                        ? "opacity-100"
+                        : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
           onPointerDown={(e) => handleEdgePointerDown(e, "right")}
           onClick={(e) => e.stopPropagation()}
           title="Drag to trim right edge · Shift+→ extend · Shift+Alt+→ shrink"
         >
-          <div className="absolute inset-y-1 right-0 w-[3px] rounded-l-sm bg-white/90 shadow-[0_0_4px_rgba(255,255,255,0.4)]" />
+          <div className="absolute inset-y-0 right-0 w-2 bg-white/10 group-hover:bg-white/15" />
+          <div
+            className={`absolute inset-y-0 right-0 w-[4px] rounded-l-[2px] shadow-[0_0_6px_rgba(255,255,255,0.55)]
+                        ${isSelected || isDraggingRender ? "bg-white" : "bg-white/85"}`}
+          />
+          <div className="absolute right-[2px] top-1/2 -translate-y-1/2 flex flex-col gap-[2px] pointer-events-none">
+            <div className="w-px h-1 bg-zinc-900/60" />
+            <div className="w-px h-1 bg-zinc-900/60" />
+            <div className="w-px h-1 bg-zinc-900/60" />
+          </div>
         </div>
       )}
     </div>
@@ -1608,6 +1897,18 @@ function ClipBlock({
 
 function formatMMSS(t: number): string {
   return `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
+}
+
+// Ruler-tick labeller. Picks resolution from `step` so sub-second zooms
+// show fractional seconds (e.g. "12.5s" / "12.50s") rather than rounding
+// everything to whole-second labels.
+function formatTick(t: number, step: number): string {
+  if (step >= 1) return formatMMSS(t);
+  const decimals = step < 0.1 ? 2 : 1;
+  const m = Math.floor(t / 60);
+  const s = t - m * 60;
+  if (m === 0) return `${s.toFixed(decimals)}s`;
+  return `${m}:${s.toFixed(decimals).padStart(decimals + 3, "0")}`;
 }
 
 function formatTC(t: number): string {
