@@ -1357,16 +1357,30 @@ function ClipBlock({
     return () => ro.disconnect();
   }, []);
 
-  // Edge trim drag — extends/shrinks the clip's source-time bounds.
-  // To restore content fully (CapCut-style "pull the clip out of its trim"),
-  // we both un-mark word-level deletions AND un-cut any AI segments
-  // (silence / repetition) that overlap the dragged range. Without the
-  // segment step, restored words appear orphaned with gaps between them.
+  // Edge trim drag — PURE NON-DESTRUCTIVE trim, CapCut-style.
   //
-  // pxPerSec is snapshotted at pointerdown and held constant for the drag.
-  // Recomputing it from the live editedDuration would create a feedback
-  // loop with restored content (drag outward → duration grows → pxPerSec
-  // shrinks → drag becomes hyper-sensitive and overshoots).
+  // The drag does ONE thing: it writes a new `clipTrims[anchorId]` record.
+  // It never touches `deletedWordIds`, never flips `segments[].isCut`, and
+  // never collapses the clip. The clipTrims system in buildEditMap step 5
+  // already does the right thing: padStart < 0 / padEnd > 0 extend the
+  // kept range past the natural word boundaries (absorbing any deleted
+  // regions in their path), and positive padStart / negative padEnd pull
+  // the visible boundary inward. Words "inside" the trim but outside the
+  // new bounds aren't deleted — they're just outside the play window, and
+  // dragging the edge back out reveals them instantly.
+  //
+  // Why this matters for the user: every previous design tried to be
+  // clever and mark words as deleted while the cursor moved. That meant
+  // dragging an edge inward could (and did) collapse the entire clip into
+  // a delete the moment the cursor swept past the last word. The fix
+  // isn't a tighter floor — it's removing the deletion path from the
+  // drag entirely. Delete is now exclusively an explicit action
+  // (Backspace, right-click → Delete).
+  //
+  // pxPerSec is snapshotted at pointerdown to avoid the feedback loop
+  // where outward drag → editedDuration grows → pxPerSec shrinks → cursor
+  // motion accelerates the drag. With a frozen ratio, 1 px of cursor
+  // travel always equals the same number of source seconds.
   const handleEdgePointerDown = useCallback(
     (e: ReactPointerEvent<HTMLDivElement>, side: "left" | "right") => {
       if (e.button !== 0) return;
@@ -1377,58 +1391,43 @@ function ClipBlock({
       if (!clipEl || !laneEl) return;
 
       const startX = e.clientX;
-      const initSrc = side === "right" ? clip.range.sourceEnd : clip.range.sourceStart;
-      const baselineDeleted = new Set(useEditorStore.getState().deletedWordIds);
-      const baselineSegments = useEditorStore.getState().segments;
-      const transcriptSnap = useEditorStore.getState().transcript;
       const clipMinSrc = clip.range.sourceStart;
       const clipMaxSrc = clip.range.sourceEnd;
+      const initSrc = side === "right" ? clipMaxSrc : clipMinSrc;
 
-      // Anchor word for this clip's trim record. We pick the first surviving
-      // word inside the clip at pointerdown — buildEditMap matches trim
-      // entries by word.start within the natural kept range, so the anchor
-      // must remain kept for the trim to land. We also capture that same
-      // word's start/end times: the inward-drag floors below clamp `target`
-      // so the anchor can never be swept into the dragged range. That's
-      // what makes a drag an adjustment instead of a delete — to actually
-      // remove a word the user has to use the explicit Delete keypress.
+      // Find the anchor word — the first surviving word inside the visible
+      // clip range. buildEditMap matches clipTrims entries by the anchor's
+      // start time falling inside the *natural* kept range, so we need a
+      // stable anchor for our writes to land. If there's no surviving word
+      // (degenerate clip), we abort the drag — there's nothing to anchor
+      // a trim to, and trimming wouldn't be meaningful anyway.
+      const store0 = useEditorStore.getState();
+      const transcriptSnap = store0.transcript;
+      const deletedSnap = store0.deletedWordIds;
       let anchorId: string | null = null;
-      let anchorStart = Infinity;
-      let anchorEnd = -Infinity;
       for (const w of transcriptSnap) {
         if (w.start < clipMinSrc || w.start >= clipMaxSrc) continue;
-        if (baselineDeleted.has(w.id)) continue;
+        if (deletedSnap.has(w.id)) continue;
         anchorId = w.id;
-        anchorStart = w.start;
-        anchorEnd = w.end;
         break;
       }
-      const baselineTrim =
-        (anchorId && useEditorStore.getState().clipTrims[anchorId]) ||
-        { padStart: 0, padEnd: 0 };
+      if (!anchorId) return;
 
-      // Snap target: the outward neighbour-clip edge for *this* handle only.
-      // On the right handle that's limits.rightLimit (anything past the
-      // clip's natural end); on the left it's limits.leftLimit. Including
-      // both edges would let a seam clip's "no-op limit" (which equals the
-      // clip's opposite edge) yank the cursor across initSrc and invert
-      // the drag — a click on the right handle of a small seam clip would
-      // snap target back to sourceStart and delete the entire clip.
-      // Word boundaries are intentionally excluded so sub-word pads stay
-      // smooth; the pad system collapses to zero on word-aligned releases.
-      const snapEdge = side === "right" ? limits.rightLimit : limits.leftLimit;
+      // Baseline trim record. We compute the *natural* (pre-trim) kept-
+      // range boundaries from this so our writes use the correct origin —
+      // padStart/padEnd are deltas from natural, not from the currently
+      // displayed edges.
+      const baselineTrim = store0.clipTrims[anchorId] ?? { padStart: 0, padEnd: 0 };
+      const naturalStart = clipMinSrc - baselineTrim.padStart;
+      const naturalEnd = clipMaxSrc - baselineTrim.padEnd;
+
       const SNAP_PX = 8;
+      const snapEdge = side === "right" ? limits.rightLimit : limits.leftLimit;
 
-      // One history entry per drag (not per pointermove). Pushed before the
-      // first mutation so undo restores the pre-drag state.
-      useEditorStore.getState().pushHistory();
+      // One history entry per drag — pushed before the first mutation so
+      // a single Cmd+Z restores the pre-drag bounds.
+      store0.pushHistory();
 
-      // Snapshot the px/sec ratio at pointerdown and keep it fixed for the
-      // entire drag. Recomputing on every pointermove caused a feedback
-      // loop: dragging outward restored content → editedDuration grew →
-      // pxPerSec shrank → the next pixel of cursor motion mapped to *more*
-      // seconds → the drag accelerated and overshot. With a frozen ratio,
-      // 100 px of cursor motion always means the same source-time delta.
       const initLaneWidth = laneEl.getBoundingClientRect().width;
       const initEditedDuration = editedDurationRef.current || editedDuration;
       const initPxPerSec =
@@ -1436,65 +1435,49 @@ function ClipBlock({
           ? initLaneWidth / initEditedDuration
           : 0;
 
-      // Smallest clip the user can shrink to via a drag. Raised from 50ms to
-      // 100ms — small enough not to prevent tight trims but large enough to
-      // stay visible at any zoom level, so the user always has a draggable
-      // sliver left after a destructive inward sweep.
+      // Minimum surviving clip width. 100ms keeps the clip clickable at any
+      // zoom level so the user always has a handle to grab and pull back
+      // out. The drag is purely visual; this just bounds how thin the clip
+      // can get on screen.
       const MIN_DRAG_CLIP = 0.10;
 
       isDraggingRef.current = true;
       setIsDraggingRender(true);
 
       let rafId: number | null = null;
-      let pendingState: {
-        deletedWordIds: Set<string>;
-        segments: typeof baselineSegments;
-        clipTrims: Record<string, { padStart: number; padEnd: number }>;
-      } | null = null;
+      let pendingTrims: Record<string, { padStart: number; padEnd: number }> | null = null;
       const flush = () => {
         rafId = null;
-        if (pendingState) {
-          useEditorStore.setState(pendingState);
-          pendingState = null;
+        if (pendingTrims) {
+          useEditorStore.setState({ clipTrims: pendingTrims });
+          pendingTrims = null;
         }
       };
 
       const onMove = (ev: PointerEvent) => {
         if (initPxPerSec <= 0) return;
-        const pxPerSec = initPxPerSec;
-        const dSec = (ev.clientX - startX) / pxPerSec;
+        const dSec = (ev.clientX - startX) / initPxPerSec;
         let target = initSrc + dSec;
-        // Inward-drag floors are computed from the clip's absolute source
-        // boundaries, NOT from the anchor word. The previous anchor-based
-        // floor was only 1ms past the anchor, so a very short anchor word
-        // near the clip edge let inward drags sweep past every other word
-        // before the floor kicked in — and on the next frame the anchor
-        // itself got deleted by `w.end <= hi`, collapsing the clip to zero.
-        // Anchoring the floor to clipMinSrc/clipMaxSrc + MIN_DRAG_CLIP makes
-        // it physically impossible for a trim drag to collapse the clip,
-        // regardless of where word boundaries fall. Anchor protection is
-        // enforced separately in the deletion loop below.
-        const inwardFloorRight = clipMinSrc + MIN_DRAG_CLIP;
-        const inwardFloorLeft = clipMaxSrc - MIN_DRAG_CLIP;
+
+        // Clamp against the neighbour edges (outward) and against the
+        // opposite edge minus MIN_DRAG_CLIP (inward). The inward clamp is
+        // purely a width floor — no word logic involved.
         if (side === "right") {
           target = target > initSrc
             ? Math.min(target, limits.rightLimit)
-            : Math.max(target, inwardFloorRight);
+            : Math.max(target, clipMinSrc + MIN_DRAG_CLIP);
         } else {
           target = target < initSrc
             ? Math.max(target, limits.leftLimit)
-            : Math.min(target, inwardFloorLeft);
+            : Math.min(target, clipMaxSrc - MIN_DRAG_CLIP);
         }
 
-        // Magnetic snap to the outward neighbour edge. Only fires when the
-        // candidate is on the same side of initSrc as the current drag
-        // (i.e. an outward-extending drag can snap to an outward edge,
-        // never to one behind the handle). Threshold is in pixels so it
-        // tightens automatically as the user zooms in.
-        const snapTol = SNAP_PX / pxPerSec;
-        const candidateOutward = side === "right"
-          ? snapEdge >= initSrc
-          : snapEdge <= initSrc;
+        // Magnetic snap to the outward neighbour edge only — never to the
+        // opposite side of initSrc (a seam clip's no-op limit equals the
+        // opposite edge and would otherwise pull the drag through itself).
+        const snapTol = SNAP_PX / initPxPerSec;
+        const candidateOutward =
+          side === "right" ? snapEdge >= initSrc : snapEdge <= initSrc;
         let snapped: number | null = null;
         if (candidateOutward && Math.abs(snapEdge - target) <= snapTol) {
           snapped = snapEdge;
@@ -1502,111 +1485,51 @@ function ClipBlock({
         }
         onSnapChange(snapped);
 
-        // The source-time interval covered by this drag. `restoring` true
-        // means the user dragged outward into the dead zone; false means
-        // they pulled the edge inward to cut more.
-        const lo = Math.min(initSrc, target);
-        const hi = Math.max(initSrc, target);
-        const restoring = side === "right" ? target > initSrc : target < initSrc;
-        // Drive the directional tint overlay. React 18 bails out on
-        // same-value setState (Object.is), so calling this every move is
-        // cheap — it only triggers a re-render when the direction actually
-        // flips.
-        setDragRestoring(restoring);
+        // Compute the new visible bounds + the trim record. The pad is a
+        // signed delta from the natural boundary; positive padEnd extends
+        // past the natural right edge into deleted territory, negative
+        // padEnd pulls the right edge inward.
+        const newStart = side === "left" ? target : clipMinSrc;
+        const newEnd = side === "right" ? target : clipMaxSrc;
+        const nextTrim = {
+          padStart: newStart - naturalStart,
+          padEnd: newEnd - naturalEnd,
+        };
 
-        // Live duration + delta readout for the drag tooltip. The new clip
-        // bounds are [clipMinSrc, target] or [target, clipMaxSrc] depending
-        // on which edge moved; delta is signed against the pre-drag length.
-        const newDurationS =
-          side === "right" ? target - clipMinSrc : clipMaxSrc - target;
+        // Direction flag drives the directional tint. "extending" means the
+        // edge is moving away from initSrc (clip grows); "trimming" means
+        // moving toward the opposite edge (clip shrinks). These are now
+        // purely visual labels — no destructive semantics.
+        const extending = side === "right" ? target > initSrc : target < initSrc;
+        setDragRestoring(extending);
+
+        const newDurationS = newEnd - newStart;
         setDragInfo({
           side,
           durationS: newDurationS,
           deltaS: newDurationS - (clipMaxSrc - clipMinSrc),
         });
 
-        const nextDeleted = new Set(baselineDeleted);
-        for (const w of transcriptSnap) {
-          // Words whose timestamps fall inside the dragged range.
-          if (w.start >= lo && w.end <= hi) {
-            if (restoring) {
-              nextDeleted.delete(w.id);
-            } else {
-              // Never mark the anchor as deleted during a shrink drag.
-              // buildEditMap looks up this clip's trim entry by the anchor
-              // word's id; if it gets swept into the deletion set the trim
-              // record orphans and the clip's boundary is recomputed wrong
-              // on the next render. Explicit Delete (keyboard / context
-              // menu) still removes the anchor — this guard only fires on
-              // the trim-drag path.
-              if (w.id !== anchorId) nextDeleted.add(w.id);
-            }
-          }
-        }
-
-        // Only restoring touches AI segment cuts. Shrinking just re-adds
-        // word IDs; the segments stay as they were.
-        let nextSegments = baselineSegments;
-        if (restoring) {
-          let mutated = false;
-          const updated = baselineSegments.map((s) => {
-            if (!s.isCut) return s;
-            if (s.endS > lo && s.startS < hi) {
-              mutated = true;
-              return { ...s, isCut: false };
-            }
-            return s;
-          });
-          if (mutated) nextSegments = updated;
-        }
-
-        // Compute the kept range's *natural* boundary on the dragged side
-        // after applying nextDeleted. The residual between target and that
-        // boundary is the sub-word pad — the missing 30–150ms that lets
-        // users catch a breath or trim a hard consonant without restoring
-        // a whole word. Anything that aligns with a word boundary collapses
-        // pad to ~0 and the entry is dropped by setClipTrim.
-        let firstStart = Infinity;
-        let lastEnd = -Infinity;
-        for (const w of transcriptSnap) {
-          if (nextDeleted.has(w.id)) continue;
-          if (w.start < limits.leftLimit || w.start >= limits.rightLimit) continue;
-          if (w.start < firstStart) firstStart = w.start;
-          if (w.end > lastEnd) lastEnd = w.end;
-        }
-        if (firstStart === Infinity) firstStart = clipMinSrc;
-        if (lastEnd === -Infinity) lastEnd = clipMaxSrc;
-
-        const nextTrim =
-          side === "right"
-            ? { padStart: baselineTrim.padStart, padEnd: target - lastEnd }
-            : { padStart: target - firstStart, padEnd: baselineTrim.padEnd };
-
-        // Bundle all three updates into one setState so React batches the
-        // re-render — avoids a flicker between the deletion + trim writes.
+        // Apply / clear the trim entry. We delete the entry when both pads
+        // collapse to ~0 so the buildEditMap step-5 loop has nothing to do
+        // for clips at their natural bounds.
         const store = useEditorStore.getState();
         let nextTrims = store.clipTrims;
-        if (anchorId) {
-          const collapse =
-            Math.abs(nextTrim.padStart) < 0.0005 &&
-            Math.abs(nextTrim.padEnd) < 0.0005;
-          if (collapse) {
-            if (anchorId in nextTrims) {
-              nextTrims = { ...nextTrims };
-              delete nextTrims[anchorId];
-            }
-          } else {
-            nextTrims = { ...nextTrims, [anchorId]: nextTrim };
+        const collapse =
+          Math.abs(nextTrim.padStart) < 0.0005 &&
+          Math.abs(nextTrim.padEnd) < 0.0005;
+        if (collapse) {
+          if (anchorId in nextTrims) {
+            nextTrims = { ...nextTrims };
+            delete nextTrims[anchorId];
           }
+        } else {
+          nextTrims = { ...nextTrims, [anchorId]: nextTrim };
         }
-        // Coalesce store writes to one per animation frame. Without this the
-        // entire Timeline (1500+ lines) re-renders on every pointermove —
-        // 100+ Hz on modern mice — and the drag visibly stutters under load.
-        pendingState = {
-          deletedWordIds: nextDeleted,
-          segments: nextSegments,
-          clipTrims: nextTrims,
-        };
+        // Coalesce writes to one per animation frame — without rAF
+        // batching the whole Timeline re-renders on every pointermove
+        // (100+ Hz mice) and the drag stutters under load.
+        pendingTrims = nextTrims;
         if (rafId === null) {
           rafId = window.requestAnimationFrame(flush);
         }
@@ -1756,31 +1679,34 @@ function ClipBlock({
         </>
       )}
 
-      {/* Directional drag overlay — green while restoring (drag is adding
-          content back), red while shrinking (drag is cutting more). Mounted
-          only during an active edge drag, sits above thumbnails but below
-          handles and the mini-inspector. */}
+      {/* Directional trim overlay — cyan while extending (clip is growing),
+          violet while shrinking (clip is being trimmed inward). Both are
+          fully reversible; no destructive red. Mounted only during an
+          active edge drag, sits above thumbnails but below handles and the
+          mini-inspector. */}
       {dragRestoring !== null && (
         <div
           className="absolute inset-0 pointer-events-none rounded-[2px] z-10"
           style={{
             background: dragRestoring
-              ? "rgba(52, 211, 153, 0.25)"
-              : "rgba(239, 68, 68, 0.20)",
+              ? "rgba(34, 211, 238, 0.20)"   // cyan-400 — clip is growing
+              : "rgba(139, 92, 246, 0.22)",  // violet-500 — clip is shrinking
           }}
         />
       )}
 
-      {/* Live trim readout — shows new clip duration plus signed delta vs
-          the pre-drag length. Anchored to the dragged edge so it sits where
-          the user is already looking. Without this the user has no way to
-          tell, mid-drag, whether they've trimmed 50 ms or 500 ms. */}
+      {/* Live trim readout — new clip duration + signed delta vs pre-drag
+          length, plus a reassurance hint reminding the user that trims are
+          reversible. The hint is the visual contract that distinguishes
+          this from a delete: even after dragging halfway across the clip,
+          you can drag back the same distance and the content reappears. */}
       {dragInfo && (
         <div
-          className={`absolute -top-7 z-40 pointer-events-none px-1.5 py-0.5 rounded
+          className={`absolute -top-8 z-40 pointer-events-none px-2 py-0.5 rounded-md
                       bg-zinc-900/95 backdrop-blur-md
-                      border border-violet-500/40 shadow-xl
-                      text-[10px] font-mono text-zinc-100 tabular-nums whitespace-nowrap`}
+                      border border-violet-400/50 shadow-xl
+                      text-[10px] font-mono text-zinc-100 tabular-nums whitespace-nowrap
+                      flex items-center gap-1.5`}
           style={dragInfo.side === "right" ? { right: 0 } : { left: 0 }}
         >
           <span>
@@ -1789,12 +1715,15 @@ function ClipBlock({
               : `${dragInfo.durationS.toFixed(2)} s`}
           </span>
           <span
-            className={`ml-1.5 ${dragInfo.deltaS >= 0 ? "text-emerald-300" : "text-red-300"}`}
+            className={dragInfo.deltaS >= 0 ? "text-cyan-300" : "text-violet-300"}
           >
             {dragInfo.deltaS >= 0 ? "+" : ""}
             {Math.abs(dragInfo.deltaS) < 1
               ? `${Math.round(dragInfo.deltaS * 1000)} ms`
               : `${dragInfo.deltaS.toFixed(2)} s`}
+          </span>
+          <span className="text-zinc-500 text-[9px] tracking-wider uppercase">
+            {dragInfo.deltaS < 0 ? "trim · drag back to restore" : "extending"}
           </span>
         </div>
       )}
@@ -1849,7 +1778,7 @@ function ClipBlock({
                         : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
           onPointerDown={(e) => handleEdgePointerDown(e, "left")}
           onClick={(e) => e.stopPropagation()}
-          title="Drag to trim left edge · Shift+← extend · Shift+Alt+← shrink"
+          title="Trim left edge — non-destructive · pull back out to restore · Shift+← / Shift+Alt+← for frame nudge"
         >
           <div className="absolute inset-y-0 left-0 w-2 bg-white/10 group-hover:bg-white/15" />
           <div
@@ -1873,7 +1802,7 @@ function ClipBlock({
                         : "opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto"}`}
           onPointerDown={(e) => handleEdgePointerDown(e, "right")}
           onClick={(e) => e.stopPropagation()}
-          title="Drag to trim right edge · Shift+→ extend · Shift+Alt+→ shrink"
+          title="Trim right edge — non-destructive · pull back out to restore · Shift+→ / Shift+Alt+→ for frame nudge"
         >
           <div className="absolute inset-y-0 right-0 w-2 bg-white/10 group-hover:bg-white/15" />
           <div
