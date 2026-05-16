@@ -250,6 +250,11 @@ export function Timeline() {
     return out;
   }, [editMap, transcript, deletedWordIds, splitMarkers]);
 
+  // Live ref for the keyboard handler (Q/W) to read clip geometry without
+  // needing it in the useEffect dependency array.
+  const clipsRef = useRef(clips);
+  useEffect(() => { clipsRef.current = clips; }, [clips]);
+
   // Word index lookup for shift-click range math.
   const indexById = useMemo(() => {
     const m = new Map<string, number>();
@@ -710,47 +715,50 @@ export function Timeline() {
       if (k !== "q" && k !== "w") return;
       e.preventDefault();
 
-      // With a selection, Q/W behave as "delete selection" — same shortcut,
-      // applied to whatever the user has highlighted.
-      if (state.selectedWordIds.size > 0) {
-        const ids = Array.from(state.selectedWordIds);
-        let lastEnd = 0;
-        for (const w of state.transcript) {
-          if (state.selectedWordIds.has(w.id) && w.end > lastEnd) lastEnd = w.end;
-        }
-        pushHistory();
-        bulkToggleWords(ids, true);
-        clearTrimsForIds(ids);
-        setSelectedWords(new Set());
-        if (k === "w" && lastEnd > 0) setSeekTime(lastEnd);
-        return;
-      }
+      // ── CapCut / DaVinci-style ripple trim to playhead ────────────
+      // Q = trim from clip-start to playhead  (delete head of clip).
+      // W = trim from playhead to clip-end    (delete tail of clip).
+      //
+      // Always scoped to the single clip the playhead sits in — never
+      // bleeds into neighbouring clips. This matches DaVinci Resolve's
+      // Q/W ripple-trim shortcuts and CapCut's split-then-delete flow.
+      // The old implementation used raw kept-range edges as boundaries
+      // which, without prior splits, could span the entire project and
+      // wipe huge chunks in one keystroke.
 
-      // Ripple from previous/next cut to the playhead.
-      const cuts = cutBoundariesRef.current;
-      let prev = 0;
-      let next = state.durationSeconds || now;
-      for (const c of cuts) {
-        if (c < now - 0.001) prev = c;
-        if (c > now + 0.001) { next = c; break; }
+      const clipsNow = clipsRef.current;
+      let activeClip: (typeof clipsNow)[number] | null = null;
+      for (const c of clipsNow) {
+        if (now >= c.range.sourceStart - 0.001 && now <= c.range.sourceEnd + 0.001) {
+          activeClip = c;
+          break;
+        }
       }
-      const lo = k === "q" ? prev : now;
-      const hi = k === "q" ? now : next;
+      // Playhead is in a deleted region (between clips) — nothing to trim.
+      if (!activeClip) return;
+
+      const clipStart = activeClip.range.sourceStart;
+      const clipEnd = activeClip.range.sourceEnd;
+
+      // Playhead flush with the trimming edge — nothing to cut.
+      if (k === "q" && now - clipStart < 0.005) return;
+      if (k === "w" && clipEnd - now < 0.005) return;
+
+      const lo = k === "q" ? clipStart : now;
+      const hi = k === "q" ? now : clipEnd;
+
       const ids: string[] = [];
       for (const w of state.transcript) {
         if (state.deletedWordIds.has(w.id)) continue;
-        // Word is "inside" the ripple range if it overlaps it materially.
         if (w.end > lo + 0.001 && w.start < hi - 0.001) ids.push(w.id);
       }
-      if (ids.length > 0) {
-        pushHistory();
-        bulkToggleWords(ids, true);
-        clearTrimsForIds(ids);
-      }
-      // Q: snap to the boundary of the new cut (i.e. `prev`), never to 0:00.
-      // The source-time playhead stays where it was — the edited-time view
-      // recomputes naturally from the updated edit map.
-      if (k === "q" && prev > 0) setSeekTime(prev);
+      if (ids.length === 0) return;
+
+      pushHistory();
+      bulkToggleWords(ids, true);
+      clearTrimsForIds(ids);
+      setSelectedWords(new Set());
+      setRangeSelection(null);
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
