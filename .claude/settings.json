@@ -32,7 +32,12 @@
       "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$|error|warning\")",
       "Bash(grep -E \"^[A-Z]:.*\\\\.\\(ts|tsx\\)$\")",
       "Bash(grep -A1 \"Timeline\\\\.tsx$\")",
-      "Bash(python -m py_compile app/utils/text_utils.py app/services/semantic_analyzer.py app/schemas/ai_schemas.py app/schemas/analysis.py app/api/media.py)"
+      "Bash(python -m py_compile app/utils/text_utils.py app/services/semantic_analyzer.py app/schemas/ai_schemas.py app/schemas/analysis.py app/api/media.py)",
+      "Read(//c/Users/USER/OneDive/Desktop/Subi-Shop/rouch-cut-editor/app/models/**)",
+      "Bash(xargs -I {} sh -c 'echo \"=== {} ===\" && ls -la {}')",
+      "Bash(npx shadcn@latest init -d --base-color zinc --css-variables true)",
+      "Bash(npx shadcn@latest init --help)",
+      "Bash(npx shadcn@latest init -d -f)"
     ],
     "additionalDirectories": [
       "c:\\Users\\USER\\OneDrive\\Desktop\\Subi-Shop\\rouch-cut-editor\\uploads"

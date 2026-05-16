@@ -143,11 +143,10 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
       setIsPlaying(true);
       const playPromise = v.play();
       if (playPromise !== undefined) {
-        playPromise.catch((error: any) => {
-          if (error?.name !== "AbortError") {
-            console.error("Video play failed:", error);
-            setIsPlaying(false);
-          }
+        playPromise.catch((error: unknown) => {
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          console.error("Video play failed:", error);
+          setIsPlaying(false);
         });
       }
     } else {
