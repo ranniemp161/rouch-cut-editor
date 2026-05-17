@@ -250,11 +250,6 @@ export function Timeline() {
     return out;
   }, [editMap, transcript, deletedWordIds, splitMarkers]);
 
-  // Live ref for the keyboard handler (Q/W) to read clip geometry without
-  // needing it in the useEffect dependency array.
-  const clipsRef = useRef(clips);
-  useEffect(() => { clipsRef.current = clips; }, [clips]);
-
   // Word index lookup for shift-click range math.
   const indexById = useMemo(() => {
     const m = new Map<string, number>();
@@ -719,26 +714,40 @@ export function Timeline() {
       // Q = trim from clip-start to playhead  (delete head of clip).
       // W = trim from playhead to clip-end    (delete tail of clip).
       //
-      // Always scoped to the single clip the playhead sits in — never
-      // bleeds into neighbouring clips. This matches DaVinci Resolve's
-      // Q/W ripple-trim shortcuts and CapCut's split-then-delete flow.
-      // The old implementation used raw kept-range edges as boundaries
-      // which, without prior splits, could span the entire project and
-      // wipe huge chunks in one keystroke.
+      // Computed directly from editMap.keptRanges (captured in the
+      // useEffect closure, always current) + splitMarkers from store.
+      // Each kept range is subdivided by any split markers inside it
+      // to form clip boundaries — Q/W only operates within the single
+      // sub-clip the playhead sits in.
 
-      const clipsNow = clipsRef.current;
-      let activeClip: (typeof clipsNow)[number] | null = null;
-      for (const c of clipsNow) {
-        if (now >= c.range.sourceStart - 0.001 && now <= c.range.sourceEnd + 0.001) {
-          activeClip = c;
+      // 1. Find the kept range the playhead is in.
+      let activeRange: KeptRange | null = null;
+      for (const r of editMap.keptRanges) {
+        if (now >= r.sourceStart - 0.001 && now <= r.sourceEnd + 0.001) {
+          activeRange = r;
           break;
         }
       }
-      // Playhead is in a deleted region (between clips) — nothing to trim.
-      if (!activeClip) return;
+      // Playhead is in a deleted region — nothing to trim.
+      if (!activeRange) return;
 
-      const clipStart = activeClip.range.sourceStart;
-      const clipEnd = activeClip.range.sourceEnd;
+      // 2. Subdivide by split markers to find exact clip boundaries.
+      const rangeStart = activeRange.sourceStart;
+      const rangeEnd = activeRange.sourceEnd;
+      const splitsIn = state.splitMarkers
+        .filter((s: number) => s > rangeStart + 0.0005 && s < rangeEnd - 0.0005)
+        .sort((a: number, b: number) => a - b);
+      const boundaries = [rangeStart, ...splitsIn, rangeEnd];
+
+      let clipStart = rangeStart;
+      let clipEnd = rangeEnd;
+      for (let i = 0; i < boundaries.length - 1; i++) {
+        if (now >= boundaries[i] - 0.001 && now <= boundaries[i + 1] + 0.001) {
+          clipStart = boundaries[i];
+          clipEnd = boundaries[i + 1];
+          break;
+        }
+      }
 
       // Playhead flush with the trimming edge — nothing to cut.
       if (k === "q" && now - clipStart < 0.005) return;

@@ -603,10 +603,10 @@ function deriveInitialClips(
   }
   if (cur) regions.push(cur);
 
-  // 2) Fold in AI-cut segments.
-  for (const s of segments) if (s.isCut) regions.push({ start: s.startS, end: s.endS });
+  // Segments intentionally not folded in — deletedWordIds is the sole
+  // source of truth (see buildEditMap for rationale).
 
-  // 3) Sort + merge overlapping/adjacent.
+  // 2) Sort + merge overlapping/adjacent.
   regions.sort((a, b) => a.start - b.start);
   const merged: Region[] = [];
   for (const r of regions) {
@@ -615,17 +615,27 @@ function deriveInitialClips(
     else merged.push({ start: r.start, end: r.end });
   }
 
-  // 4) Absorb tiny kept slivers.
+  // 3) Absorb gaps between deletions only when they contain no kept
+  //    spoken words. Never swallow a word the user sees as "kept."
+  const hasKeptWord = (a: number, b: number): boolean => {
+    for (const w of transcript) {
+      if (w.start >= a && w.start < b && w.word !== "[SILENCE]" && !deletedWordIds.has(w.id)) return true;
+    }
+    return false;
+  };
   const collapsed: Region[] = [];
   for (const r of merged) {
     const last = collapsed[collapsed.length - 1];
-    if (last && r.start - last.end < CLIP_MIN_KEPT_S) last.end = Math.max(last.end, r.end);
-    else collapsed.push({ start: r.start, end: r.end });
+    if (last && !hasKeptWord(last.end, r.start)) {
+      last.end = Math.max(last.end, r.end);
+    } else {
+      collapsed.push({ start: r.start, end: r.end });
+    }
   }
   if (collapsed.length > 0) {
-    if (collapsed[0].start > 0 && collapsed[0].start < CLIP_MIN_KEPT_S) collapsed[0].start = 0;
+    if (collapsed[0].start > 0 && !hasKeptWord(0, collapsed[0].start)) collapsed[0].start = 0;
     const tail = collapsed[collapsed.length - 1];
-    if (sourceDuration - tail.end > 0 && sourceDuration - tail.end < CLIP_MIN_KEPT_S) {
+    if (sourceDuration > tail.end && !hasKeptWord(tail.end, sourceDuration)) {
       tail.end = sourceDuration;
     }
   }
