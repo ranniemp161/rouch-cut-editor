@@ -33,6 +33,14 @@ _UNDO_PHRASES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsorry,?\s+(?:let'?s|let me)\s+(?:redo|try (?:that|this) again)\b", re.I),
     re.compile(r"\bstart (?:again|over|now)\b", re.I),
     re.compile(r"\bredo (?:that|this|the last)\b", re.I),
+    re.compile(r"\bnever\s*mind\b", re.I),
+    re.compile(r"\bhold on,?\s+(?:let me|let's)\s+(?:redo|try|start)\b", re.I),
+    re.compile(r"\bactually,?\s+(?:let me|let's)\s+(?:start|try|redo)\b", re.I),
+    re.compile(r"\bthat'?s?\s+(?:not right|wrong|not what i)\b", re.I),
+    re.compile(r"\bwait,?\s+(?:let me|i'?ll)\s+(?:redo|try|start)\b", re.I),
+    re.compile(r"\bdelete that\b", re.I),
+    re.compile(r"\bcut that (?:out|part)\b", re.I),
+    re.compile(r"\bforget (?:that|it|what i said)\b", re.I),
 )
 
 # Markers — NOT cuts. The frontend renders these in a distinct colour to show
@@ -54,7 +62,19 @@ _META_PHRASES: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bnonsense (?:right )?now\b", re.I),
     re.compile(r"\bwhat am i (?:saying|doing)\b", re.I),
     re.compile(r"\bi'?m (?:so )?(?:tired|lost|confused)\b", re.I),
-    re.compile(r"\b(?:ugh|jeez|christ)\b", re.I),
+    re.compile(r"\b(?:ugh|jeez|christ|dammit|damn it|crap|shoot|gosh)\b", re.I),
+    re.compile(r"\bthat (?:didn'?t|doesn'?t|does not|did not) make (?:any )?sense\b", re.I),
+    re.compile(r"\blet me think\b", re.I),
+    re.compile(r"\bhow do i (?:say|explain|put) (?:this|that)\b", re.I),
+    re.compile(r"\bwhat'?s the word\b", re.I),
+    re.compile(r"\bwait wait\b", re.I),
+    re.compile(r"\bno no no\b", re.I),
+    re.compile(r"\bthat'?s (?:not right|wrong|terrible|awful|bad)\b", re.I),
+    re.compile(r"\bi (?:messed|screwed|mucked) (?:that |it )?up\b", re.I),
+    re.compile(r"\bwhy (?:can'?t|did) i\b", re.I),
+    re.compile(r"\bsorry(?:\s+about that)?\b", re.I),
+    re.compile(r"\boh (?:man|boy|no|dear|gosh|geez)\b", re.I),
+    re.compile(r"\bfor (?:god'?s?|heaven'?s?|goodness) sake\b", re.I),
 )
 
 # When backing up to find the start of the "preceding thought", we stop at:
@@ -68,7 +88,7 @@ _THOUGHT_MAX_WORDS = 25
 # scanning forward through frustration speech until we hit one of these at the
 # start of a new sentence — everything between the frustration trigger and
 # the connector is cut.
-_RESET_CONNECTORS = {"so", "anyway", "now", "okay", "alright", "right"}
+_RESET_CONNECTORS = {"so", "anyway", "now", "okay", "alright", "right", "basically", "moving", "the", "look", "here"}
 _RESET_MAX_WORDS = 30
 
 

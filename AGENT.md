@@ -14,7 +14,7 @@ Its killer feature is the **Semantic Rough Cut Engine**: it uses AI to analyze t
 * **Frontend:** Next.js 14+ (App Router), TypeScript, Tailwind CSS, Zustand, shadcn/ui.
 * **Backend:** Python 3.11+, FastAPI, FFmpeg-python, SQLModel.
 * **Database:** Neon (Serverless PostgreSQL).
-* **AI Engine:** Google Gemini 1.5 Flash (Semantic Analysis) & faster-whisper (Transcription).
+* **AI Engine:** Google Gemini 2.5 Flash (Semantic Analysis, temperature=0, structured output) & faster-whisper `small` model (Transcription, VAD-filtered, initial_prompt-guided).
 * **Architecture:** Monorepo (`/frontend` and `/backend`).
 * **Deployment:** Vercel (Frontend) and Render via Docker (Backend). CORS is strictly locked between the two.
 
@@ -30,7 +30,7 @@ Its killer feature is the **Semantic Rough Cut Engine**: it uses AI to analyze t
     * **Playhead:** The playhead's vertical intersection dictates all keyboard cuts.
     * **Shortcuts:** `S` (Split at playhead), `Q` (Ripple Delete Left), `W` (Ripple Delete Right), `Backspace` (Delete selected clip).
     * **Edge Trimming:** Dragging the edges of a clip (`ew-resize`) dynamically recalculates timestamps to remove/add words to the `deletedWordIds` Set.
-* **The Semantic Engine (Backend):** Silence is calculated by exact math (timestamp gaps > 0.5s). Contextual mistakes (stutters, filler words) are identified by Gemini. The backend merges these into an `initial_deleted_ids` array and sends it to the client.
+* **The Semantic Engine (Backend):** Silence is calculated by FFmpeg silencedetect (-35dB, 0.3s min) — NOT inter-word arithmetic. Contextual mistakes (stutters, filler words, false starts, retakes, verbal undos, frustration) are identified by a 3-stage pipeline: (1) regex heuristic pre-pass, (2) Gemini semantic analysis with few-shot examples and confidence markers, (3) post-processing edge cleanup (hanging connectors + trailing orphans). The backend merges these into an `initial_deleted_ids` array and sends it to the client.
 
 ## 6. Debugging Protocol
 If the user reports a bug in the timeline or video sync:

@@ -50,15 +50,23 @@ _SYSTEM_INSTRUCTION = (
     "verbal instructions to the editor, and makes meta-comments about the "
     "recording process. Your job is to surface only the FINAL, successful take "
     "and strip every verbal 'undo' command, placeholder instruction, and "
-    "frustration outburst.\n"
+    "frustration outburst.\n\n"
+
     "THE 90% MANDATE: Error on the side of CUTTING. It is easier for a human to "
-    "restore a cut than to find a missed one. When in doubt, cut.\n"
+    "restore a cut than to find a missed one. When in doubt, cut.\n\n"
+
+    "CONFIDENCE MARKERS: Words tagged with [?] have low transcription confidence "
+    "(the speech-to-text model is unsure what was said). Do NOT cut a [?] word "
+    "unless it is clearly filler or part of a larger cut region. A [?] word in "
+    "isolation is more likely a transcription error than actual garbage speech.\n\n"
+
     "Rule 1: Context is King. Do not cut pauses or repetition if they are CLEARLY "
     "stylistic (deliberate emphasis, rhetorical anaphora, list enumeration). "
     "Otherwise, cut.\n"
     "Rule 2: The Filler Mandate. Always target filler words ('um', 'uh', 'er', 'ah', "
     "'like', 'you know', 'I mean', 'sort of', 'kind of', 'basically', 'literally', "
-    "'actually') unless they carry real structural meaning in the sentence.\n"
+    "'actually', 'right', 'okay so', 'well') unless they carry real structural "
+    "meaning in the sentence.\n"
     "Rule 3: False Starts. If a speaker stutters or restarts a sentence "
     "('So if we look at... if we look at the data'), cut the first failed attempt and "
     "keep the final clean delivery.\n"
@@ -83,16 +91,19 @@ _SYSTEM_INSTRUCTION = (
     "signal ('start now', 'okay so', 'anyway') and use whatever comes after it.\n"
     "Rule 7: VERBAL COMMAND RECOGNITION. The creator will literally say 'cancel that "
     "last line', 'ignore that', 'scratch that', 'sorry let's redo that', 'start "
-    "again', 'strike that'. Treat these as explicit DELETE commands. Cut the trigger "
-    "phrase itself AND the entire preceding thought (back to the previous sentence "
-    "boundary or significant pause), regardless of whether the retake matches the "
-    "deleted text. Do not require text similarity to honour the command.\n"
+    "again', 'strike that', 'never mind', 'hold on let me redo'. Treat these as "
+    "explicit DELETE commands. Cut the trigger phrase itself AND the entire preceding "
+    "thought (back to the previous sentence boundary or significant pause), regardless "
+    "of whether the retake matches the deleted text. Do not require text similarity "
+    "to honour the command.\n"
     "Rule 8: META-TALK & FRUSTRATION. Identify speech directed at the creator "
     "themselves or the editor — 'sorry', 'oh my god', 'this is a mess', 'nonsense "
-    "right now', 'what am I saying'. CUT these with high priority. After a frustration "
-    "block, search forward for the next clean sentence opening with a strong connector "
-    "('So,' 'Anyway,' 'Now,' 'Okay,'). Cut everything from the frustration trigger up "
-    "to (but not including) that reset connector.\n"
+    "right now', 'what am I saying', 'wait wait wait', 'no no no', 'that's wrong', "
+    "'that didn't make sense', 'let me think', 'how do I say this', 'what's the word'. "
+    "CUT these with high priority. After a frustration block, search forward for the "
+    "next clean sentence opening with a strong connector ('So,' 'Anyway,' 'Now,' "
+    "'Okay,' 'Alright,' 'The point is,'). Cut everything from the frustration trigger "
+    "up to (but not including) that reset connector.\n"
     "Rule 9: ACTION MARKERS — DO NOT CUT, TAG. Phrases like 'play clip 2 here', "
     "'insert b-roll', 'include the substack call to action', 'cut to b-roll' are "
     "instructions to a future editor. They are NOT part of the spoken script and "
@@ -102,7 +113,29 @@ _SYSTEM_INSTRUCTION = (
     "marker stays visible.\n"
     "Rule 10: Completeness. When you cut a false start or earlier repetition, also "
     "cut any trailing filler/connector words ('so', 'and', 'but', 'um') that bridge "
-    "to the clean take, so the final edit reads seamlessly.\n"
+    "to the clean take, AND any leading orphaned articles/prepositions ('the', 'a', "
+    "'to', 'of') that precede the cut region and no longer attach to anything "
+    "meaningful. The final edit must read as a seamless, natural sentence.\n\n"
+
+    "--- FEW-SHOT EXAMPLE ---\n"
+    "INPUT:\n"
+    "[ID: 1] So [ID: 2] um [ID: 3] today [ID: 4] we're [ID: 5] going "
+    "[ID: 6] to [ID: 7] talk [ID: 8] about [ID: 9] uh [ID: 10] we're "
+    "[ID: 11] going [ID: 12] to [ID: 13] talk [ID: 14] about [ID: 15] the "
+    "[ID: 16] new [ID: 17] feature. [ID: 18] Oh [ID: 19] my [ID: 20] god "
+    "[ID: 21] that [ID: 22] was [ID: 23] terrible. [ID: 24] Okay [ID: 25] so "
+    "[ID: 26] today [ID: 27] we're [ID: 28] launching [ID: 29] a [ID: 30] brand "
+    "[ID: 31] new [ID: 32] feature. [ID: 33] Insert [ID: 34] b-roll "
+    "[ID: 35] here.\n"
+    "OUTPUT:\n"
+    '{"words_to_cut": ["1","2","3","4","5","6","7","8","9","10","11","12",'
+    '"13","14","15","16","17","18","19","20","21","22","23"],'
+    '"action_marker_ids": ["33","34","35"]}\n'
+    "EXPLANATION: IDs 1-17 = false start + filler (Rule 3). IDs 18-23 = "
+    "frustration/meta-talk (Rule 8). IDs 24-32 = kept (clean final take). "
+    "IDs 33-35 = action marker, NOT cut (Rule 9).\n"
+    "--- END EXAMPLE ---\n\n"
+
     "Return a JSON object with `words_to_cut` (array of Word IDs to delete) and "
     "`action_marker_ids` (array of Word IDs to tag as markers — these are NOT cut). "
     "An ID must appear in at most one of the two lists."
@@ -110,14 +143,23 @@ _SYSTEM_INSTRUCTION = (
 
 # Lone connector words that, when stranded immediately before a cut region,
 # create a jarring "hanging" edit ("So... [cut]"). Post-processing trims them.
-_HANGING_CONNECTORS = {"so", "but", "and", "because", "or", "well", "now", "then"}
+_HANGING_CONNECTORS = {"so", "but", "and", "because", "or", "well", "now", "then", "yet", "also"}
+
+# Orphaned articles/prepositions left dangling after a cut region.
+# "...the [CUT]" or "...to [CUT]" sounds broken — absorb them into the cut.
+_TRAILING_ORPHANS = {"the", "a", "an", "to", "of", "for", "in", "on", "at", "with", "by", "from"}
+
+# Safety cap: if Gemini flags more than this fraction of spoken words, something
+# is wrong (prompt injection, hallucination, or a degenerate transcript).
+# We discard the Gemini result and fall back to heuristic-only.
+_MAX_CUT_RATIO = 0.80
 
 # Long-form videos exceed Gemini's effective context-recall window. We chunk
 # by spoken-word time into overlapping windows so every region is analysed
 # with adequate surrounding context, then merge cut IDs across chunks.
 _LONG_VIDEO_THRESHOLD_S = 600.0   # 10 minutes
 _CHUNK_DURATION_S = 300.0         # 5 minutes
-_CHUNK_OVERLAP_S = 30.0           # 30s overlap to avoid context-window forgetfulness
+_CHUNK_OVERLAP_S = 60.0           # 60s overlap — take clusters often span 30+ seconds
 
 
 def analyze_transcript_for_mistakes(
@@ -198,6 +240,7 @@ def _analyze_chunk(chunk: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
     if not chunk:
         return [], []
     chunk_ids = {str(w["id"]) for w in chunk if "id" in w}
+    spoken_ids = {str(w["id"]) for w in chunk if "id" in w and not w.get("is_silence")}
     formatted = _format_transcript(chunk)
     try:
         model = genai.GenerativeModel(
@@ -209,6 +252,7 @@ def _analyze_chunk(chunk: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
             generation_config=genai.GenerationConfig(
                 response_mime_type="application/json",
                 response_schema=SmartCutResponse,
+                temperature=0.0,
             ),
         )
         result = SmartCutResponse.model_validate_json(response.text)
@@ -217,6 +261,21 @@ def _analyze_chunk(chunk: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
         return [], []
     cuts = [wid for wid in dict.fromkeys(result.words_to_cut) if wid in chunk_ids]
     markers = [wid for wid in dict.fromkeys(result.action_marker_ids) if wid in chunk_ids]
+
+    # Sanity check: if Gemini wants to cut > 80% of spoken words, something is
+    # very wrong (hallucination, degenerate transcript, prompt injection).
+    # Discard the result entirely and let the heuristic pre-pass handle it.
+    if spoken_ids:
+        cut_ratio = len(set(cuts) & spoken_ids) / len(spoken_ids)
+        if cut_ratio > _MAX_CUT_RATIO:
+            logger.warning(
+                "Gemini flagged %.0f%% of spoken words for cutting — discarding "
+                "as likely hallucination (chunk has %d spoken words)",
+                cut_ratio * 100,
+                len(spoken_ids),
+            )
+            return [], []
+
     return cuts, markers
 
 
@@ -263,31 +322,67 @@ def _glue_connectors(
     cut_ids: list[str],
 ) -> list[str]:
     """
-    Post-processing pass: clean up the edges of every cut region. If a lone
-    connector word ('so', 'but', 'and', 'because', …) sits immediately before
-    a run of cut words, it would dangle as a hanging edit — so cut it too.
+    Post-processing pass: clean up the edges of every cut region.
+
+    1. **Leading connectors**: if a lone connector ('so', 'but', …) sits
+       immediately before a run of cut words, it would dangle — cut it.
+    2. **Trailing orphans**: if a lone article/preposition ('the', 'a', 'to')
+       sits immediately after a run of cut words, it's orphaned — cut it.
+
+    Both passes run iteratively until no more changes are found (a connector
+    absorbed by pass 1 may expose a new orphan for pass 2).
     """
     if not cut_ids or not words:
         return cut_ids
     cut_set = set(cut_ids)
     id_to_index = {str(w["id"]): i for i, w in enumerate(words) if "id" in w}
+    index_to_id = {i: str(w["id"]) for i, w in enumerate(words) if "id" in w}
     extra: list[str] = []
-    for cid in cut_ids:
-        idx = id_to_index.get(cid)
-        if idx is None or idx == 0:
-            continue
-        # Only act on the FIRST cut of a contiguous cut run.
-        prev_word = words[idx - 1]
-        prev_id = str(prev_word.get("id", ""))
-        if prev_id in cut_set:
-            continue
-        token = str(prev_word.get("word", "")).lower().strip(".,!?;:\"'")
-        if token in _HANGING_CONNECTORS and prev_id not in cut_set:
-            extra.append(prev_id)
-            cut_set.add(prev_id)
+
+    changed = True
+    while changed:
+        changed = False
+
+        # Pass 1 — leading connectors (word BEFORE the first cut in a run).
+        for cid in list(cut_set):
+            idx = id_to_index.get(cid)
+            if idx is None or idx == 0:
+                continue
+            prev_word = words[idx - 1]
+            prev_id = str(prev_word.get("id", ""))
+            if prev_id in cut_set:
+                continue
+            token = str(prev_word.get("word", "")).lower().strip(".,!?;:\"'")
+            if token in _HANGING_CONNECTORS:
+                extra.append(prev_id)
+                cut_set.add(prev_id)
+                changed = True
+
+        # Pass 2 — trailing orphans (word AFTER the last cut in a run).
+        for cid in list(cut_set):
+            idx = id_to_index.get(cid)
+            if idx is None or idx >= len(words) - 1:
+                continue
+            next_word = words[idx + 1]
+            next_id = str(next_word.get("id", ""))
+            if next_id in cut_set:
+                continue
+            token = str(next_word.get("word", "")).lower().strip(".,!?;:\"'")
+            if token in _TRAILING_ORPHANS:
+                # Only absorb if the NEXT-next word is also cut or doesn't exist
+                # (i.e. the orphan truly dangles — it doesn't attach to a kept word).
+                idx2 = idx + 2
+                if idx2 >= len(words) or index_to_id.get(idx2, "") not in cut_set:
+                    # Check: does the orphan start a kept phrase? If the word
+                    # after it is kept, the article likely belongs to it.
+                    if idx2 < len(words) and index_to_id.get(idx2, "") not in cut_set:
+                        continue
+                extra.append(next_id)
+                cut_set.add(next_id)
+                changed = True
+
     if not extra:
         return cut_ids
-    # Preserve original order, append new connector cuts at the end.
     return cut_ids + extra
 
 
@@ -295,9 +390,27 @@ def _glue_connectors(
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+_LOW_CONFIDENCE_THRESHOLD = 0.5
+
+
 def _format_transcript(words: list[dict[str, Any]]) -> str:
     """
-    Render the word list as the inline ID-tagged string Gemini expects:
-        "[ID: 1] So [ID: 2] um [ID: 3] I [ID: 4] think ..."
+    Render the word list as the inline ID-tagged string Gemini expects.
+
+    Words with low Whisper confidence (probability < 0.5) are flagged with a
+    ``[?]`` marker so Gemini knows the transcription may be wrong and can avoid
+    making aggressive cut decisions on phantom words::
+
+        [ID: 1] So [ID: 2] um [ID: 3][?] I [ID: 4] think ...
     """
-    return " ".join(f"[ID: {w['id']}] {w['word']}" for w in words if "id" in w)
+    parts: list[str] = []
+    for w in words:
+        if "id" not in w:
+            continue
+        prob = w.get("probability")
+        low_conf = (
+            isinstance(prob, (int, float)) and prob < _LOW_CONFIDENCE_THRESHOLD
+        )
+        tag = f"[ID: {w['id']}]{'[?]' if low_conf else ''}"
+        parts.append(f"{tag} {w['word']}")
+    return " ".join(parts)

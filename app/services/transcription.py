@@ -3,7 +3,7 @@ Whisper transcription service (faster-whisper backend).
 
 Uses a module-level singleton so the model weights are loaded from disk only
 once per process lifetime. The first call downloads the model to
-~/.cache/huggingface/hub/ (≈ 74 MB for "base").
+~/.cache/huggingface/hub/ (≈ 244 MB for "small").
 
 Expected output shape per word:
     {"word": str, "start": float, "end": float, "probability": float}
@@ -17,8 +17,10 @@ from typing import Any
 
 from faster_whisper import WhisperModel
 
-# Configurable via env so production can bump to "small" or "medium".
-_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
+# "small" cuts Word Error Rate roughly in half vs "base" (~5% vs ~10%).
+# Override via WHISPER_MODEL_SIZE=medium for even better accuracy at the cost
+# of ~3× more RAM and slower transcription.
+_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "small")
 
 _model: WhisperModel | None = None
 
@@ -38,7 +40,24 @@ def transcribe(audio_path: str, silence_threshold: float = 0.5) -> list[dict[str
     caller gets a plain list that is safe to serialise to JSON/Postgres.
     """
     model = _get_model()
-    segments, _ = model.transcribe(audio_path, word_timestamps=True)
+
+    # initial_prompt biases the decoder toward correct casing, punctuation, and
+    # recognition of filler words / verbal commands that are critical for the
+    # rough-cut engine. It also reduces hallucination of non-existent words in
+    # quiet passages.
+    initial_prompt = (
+        "Um, uh, like, you know, I mean, basically, actually, literally, "
+        "sort of, kind of. Cancel that. Scratch that. Ignore that. Start again. "
+        "Let's redo that. Insert b-roll. Play clip. Call to action."
+    )
+
+    segments, _ = model.transcribe(
+        audio_path,
+        word_timestamps=True,
+        initial_prompt=initial_prompt,
+        condition_on_previous_text=True,
+        vad_filter=True,
+    )
 
     words: list[dict[str, Any]] = []
     for segment in segments:
