@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorStore, type TranscriptSegment } from "@/store/useEditorStore";
-import { sourceToEdited, editedToSource, type EditMap } from "@/lib/editMap";
-import { useEditMap } from "@/hooks/useEditMap";
+import { buildEditMap, sourceToEdited, editedToSource, type EditMap } from "@/lib/editMap";
 
 // How far before a deleted region we issue the seek. Browser seeks have
 // 30–150ms of latency, so a purely reactive skip leaks that much deleted
@@ -44,8 +43,12 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   const clipTrims = useEditorStore((s) => s.clipTrims);
 
   // Single source of truth for cut-skipping: the same edit map the timeline
-  // uses to render the ripple view. Re-derived via Web Worker to unblock the UI.
-  const editMap = useEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims);
+  // uses to render the ripple view. Re-derived whenever deletions change.
+  // Fast enough to run synchronously thanks to O(N log N) binary search optimization.
+  const editMap = useMemo(
+    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
+    [transcript, deletedWordIds, segments, sourceDuration, clipTrims]
+  );
 
   // Object URL lifecycle — created on file change, revoked on cleanup.
   useEffect(() => {
@@ -125,6 +128,24 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [isPlaying, setStoreCurrentTime]);
+
+  // ── Rescue stranded playhead on editMap change (Paused) ──────────────────
+  // If the user makes a cut (like Q/W ripple trim) while the video is paused,
+  // and that cut swallows the current playhead position, the playhead will
+  // fall into a deleted region. The timeline renderer maps deleted regions to
+  // null, causing the playhead to visually snap to 0:00. This effect instantly
+  // rescues the playhead to the nearest valid kept edge.
+  useEffect(() => {
+    if (isPlaying || !videoRef.current) return;
+    const t = videoRef.current.currentTime;
+    const insideCut = editMap.deletedRegions.find((r) => t >= r.start && t < r.end);
+    if (insideCut) {
+      const target = snapToKept(t, editMap);
+      videoRef.current.currentTime = target;
+      setSourceTime(target);
+      setStoreCurrentTime(target);
+    }
+  }, [editMap, isPlaying, setStoreCurrentTime]);
 
   const handleLoadedMetadata = useCallback(() => {
     setSourceDuration(videoRef.current?.duration ?? 0);

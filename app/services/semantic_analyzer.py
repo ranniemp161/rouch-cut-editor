@@ -40,9 +40,9 @@ if _API_KEY:
 else:
     logger.warning("GEMINI_API_KEY not set — semantic_analyzer falls back to heuristic-only output")
 
-# Override via GEMINI_MODEL if Google retires this one. As of mid-2026 the 1.5
-# series is fully decommissioned; 2.5-flash is the current fast/cheap default.
-_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+# Override via GEMINI_MODEL. We use gemini-3.1-pro as the default to ensure
+# deep semantic and contextual understanding of complex thought loops.
+_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.1-pro")
 
 _SYSTEM_INSTRUCTION = (
     "You are an expert, ruthless video editor targeting a 90% PERFECT rough cut "
@@ -51,6 +51,9 @@ _SYSTEM_INSTRUCTION = (
     "recording process. Your job is to surface only the FINAL, successful take "
     "and strip every verbal 'undo' command, placeholder instruction, and "
     "frustration outburst.\n\n"
+    "CRITICAL REQUIREMENT: You must apply DEEP SEMANTIC AND CONTEXTUAL UNDERSTANDING. "
+    "Do not just look for exact word matches. Analyze the *intent* of the speaker. "
+    "If they are conveying the exact same concept twice, cut the weaker attempt.\n\n"
 
     "THE 90% MANDATE: Error on the side of CUTTING. It is easier for a human to "
     "restore a cut than to find a missed one. When in doubt, cut.\n\n"
@@ -79,9 +82,10 @@ _SYSTEM_INSTRUCTION = (
     "      phrase AND the filler.\n"
     "  (d) Re-runs the same sentence frame with a different ending. Cut the abandoned "
     "      frame.\n"
-    "Rule 5: TARGET 'THOUGHT LOOPS'. If a speaker explains the same concept twice in a "
-    "row, even with completely different words, DELETE the first attempt. Only keep the "
-    "most confident and concise version.\n"
+    "Rule 5: TARGET 'THOUGHT LOOPS'. Apply strict semantic understanding: If a speaker "
+    "explains the same concept twice in a row, even with completely different words or "
+    "analogies, DELETE the first attempt. Only keep the most confident and concise "
+    "version that serves the final narrative.\n"
     "Rule 6: PRIORITY ON RE-TAKES — 'The Last Take' Algorithm. Speakers iterate on a "
     "sentence 2-4 times before getting it right. Cluster adjacent segments by INTENT "
     "(what they're trying to say). Within a Take Cluster, ALWAYS keep the LAST take "

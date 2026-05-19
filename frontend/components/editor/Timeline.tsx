@@ -14,11 +14,11 @@ import { Scissors, RotateCw, Minus, Plus, Magnet, Maximize2 } from "lucide-react
 import { useEditorStore } from "@/store/useEditorStore";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import {
+  buildEditMap,
   editedToSource,
   sourceToEdited,
   type KeptRange,
 } from "@/lib/editMap";
-import { useEditMap } from "@/hooks/useEditMap";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { FrameStrip } from "./FrameStrip";
 import { Minimap } from "./Minimap";
@@ -107,7 +107,10 @@ export function Timeline() {
   const menu = useContextMenu();
 
   // ── Edit map: source ↔ edited mapping ─────────────────────────────────────
-  const editMap = useEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims);
+  const editMap = useMemo(
+    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
+    [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
+  );
   const editedDuration = editMap.editedDuration;
   const canRender = editedDuration > 0;
 
@@ -172,14 +175,11 @@ export function Timeline() {
   const clips = useMemo<Clip[]>(() => {
     if (editMap.keptRanges.length === 0) return [];
     const out: Clip[] = [];
-    let wi = 0;
     for (const range of editMap.keptRanges) {
       const splitsIn = splitMarkers
         .filter((s) => s > range.sourceStart + 0.0005 && s < range.sourceEnd - 0.0005)
         .sort((a, b) => a - b);
       const boundaries = [range.sourceStart, ...splitsIn, range.sourceEnd];
-
-      while (wi < transcript.length && transcript[wi].start < range.sourceStart) wi++;
 
       for (let bi = 0; bi < boundaries.length - 1; bi++) {
         const subStart = boundaries[bi];
@@ -190,28 +190,24 @@ export function Timeline() {
           editedStart: range.editedStart + (subStart - range.sourceStart),
           editedEnd: range.editedStart + (subEnd - range.sourceStart),
         };
-        // Include EVERY transcript word whose start lies inside the sub-clip,
-        // regardless of deletion state. The deletion filter we used to apply
-        // here turned trim-extended kept ranges into "phantom clips" with no
-        // wordIds — right-click → Delete on those silently failed because
-        // bulkToggleWords was called with []. Including the deleted words
-        // means Delete/Restore always has something to act on; the actual
-        // visible state of each word is still driven by deletedWordIds in
-        // the transcript sidebar and the player skip.
+        // Include EVERY transcript word that overlaps this sub-clip.
+        // We use overlap (w.end > subStart && w.start < subEnd) so that words
+        // spanning across a split marker are assigned to both halves, ensuring
+        // right-click -> Delete always has wordIds to act upon.
         const allIds: string[] = [];
         const keptIds: string[] = [];
         let anchor = -1;
-        let j = wi;
-        while (j < transcript.length && transcript[j].start < subEnd) {
+        
+        for (let j = 0; j < transcript.length; j++) {
           const w = transcript[j];
-          if (w.start >= subStart) {
+          if (w.start >= subEnd) break;
+          if (w.end > subStart + 0.001) {
             allIds.push(w.id);
             if (!deletedWordIds.has(w.id)) {
               keptIds.push(w.id);
               if (anchor === -1) anchor = j;
             }
           }
-          j++;
         }
         // Render every sub-clip whose span has real duration. Deletions are
         // already excluded at the edit-map level (deleted regions truncate
@@ -235,14 +231,12 @@ export function Timeline() {
             range: subRange,
             wordIds: allIds,
             keptWordIds: keptIds,
-            anchorIndex: anchor === -1 ? wi : anchor,
+            anchorIndex: anchor === -1 ? 0 : anchor,
             text: keptWords.join(" "),
             firstWord: keptWords[0] ?? "",
             lastWord: keptWords[keptWords.length - 1] ?? "",
           });
         }
-        // Advance wi past this sub-clip so the next sub starts after it.
-        while (wi < transcript.length && transcript[wi].start < subEnd) wi++;
       }
     }
     return out;

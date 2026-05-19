@@ -390,8 +390,26 @@ export const useEditorStore = create<EditorStore>((set) => ({
   // Replacing the Set is required for Zustand to detect the change.
   // Mutating in-place would not trigger subscribed components to re-render.
 
-  setTranscript: (words) =>
-    set({ transcript: words, deletedWordIds: new Set<string>(), clipTrims: {} }),
+  setTranscript: (words) => {
+    // Inject [SILENCE] pseudo-words for gaps > 0.1s so that purely silent
+    // regions have a word ID. This allows them to be selected and deleted
+    // from the timeline context menu.
+    const withSilences: typeof words = [];
+    let prevEnd = 0;
+    for (const w of words) {
+      if (w.start > prevEnd + 0.1) {
+        withSilences.push({
+          id: `silence-${prevEnd.toFixed(3)}-${w.start.toFixed(3)}`,
+          word: "[SILENCE]",
+          start: prevEnd,
+          end: w.start,
+        });
+      }
+      withSilences.push(w);
+      prevEnd = Math.max(prevEnd, w.end);
+    }
+    set({ transcript: withSilences, deletedWordIds: new Set<string>(), clipTrims: {} });
+  },
 
   toggleWordState: (wordId) =>
     set((s) => {
