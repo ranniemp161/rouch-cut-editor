@@ -21,6 +21,7 @@ import {
 import { useEditMap } from "@/hooks/useEditMap";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { FrameStrip } from "./FrameStrip";
+import { Minimap } from "./Minimap";
 
 type Lane = "V1" | "A1";
 
@@ -960,6 +961,17 @@ export function Timeline() {
           <Plus size={11} />
         </button>
       </div>
+
+      {/* Minimap — bird's-eye view of the full edit sequence */}
+      {canRender && (
+        <Minimap
+          editMap={editMap}
+          zoom={zoom}
+          scrollRef={scrollRef}
+          editedDuration={editedDuration}
+          playheadEdited={playheadEdited}
+        />
+      )}
 
       {/* Scroll viewport */}
       <div
