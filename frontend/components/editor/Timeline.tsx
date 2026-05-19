@@ -14,11 +14,11 @@ import { Scissors, RotateCw, Minus, Plus, Magnet, Maximize2 } from "lucide-react
 import { useEditorStore } from "@/store/useEditorStore";
 import { useContextMenu } from "@/hooks/useContextMenu";
 import {
-  buildEditMap,
   editedToSource,
   sourceToEdited,
   type KeptRange,
 } from "@/lib/editMap";
+import { useEditMap } from "@/hooks/useEditMap";
 import { WaveformCanvas } from "./WaveformCanvas";
 import { FrameStrip } from "./FrameStrip";
 
@@ -106,10 +106,7 @@ export function Timeline() {
   const menu = useContextMenu();
 
   // ── Edit map: source ↔ edited mapping ─────────────────────────────────────
-  const editMap = useMemo(
-    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
-    [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
-  );
+  const editMap = useEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims);
   const editedDuration = editMap.editedDuration;
   const canRender = editedDuration > 0;
 

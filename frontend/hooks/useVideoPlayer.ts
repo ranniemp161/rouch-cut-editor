@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useEditorStore, type TranscriptSegment } from "@/store/useEditorStore";
-import { buildEditMap, sourceToEdited, editedToSource, type EditMap } from "@/lib/editMap";
+import { sourceToEdited, editedToSource, type EditMap } from "@/lib/editMap";
+import { useEditMap } from "@/hooks/useEditMap";
 
 // How far before a deleted region we issue the seek. Browser seeks have
 // 30–150ms of latency, so a purely reactive skip leaks that much deleted
@@ -43,13 +44,8 @@ export function useVideoPlayer(mediaFile: File | null, segments: TranscriptSegme
   const clipTrims = useEditorStore((s) => s.clipTrims);
 
   // Single source of truth for cut-skipping: the same edit map the timeline
-  // uses to render the ripple view. Re-derived whenever deletions change.
-  // clipTrims feeds in so the rAF skip respects sub-word edge nudges — a
-  // padEnd of +0.1s lets that 100ms of "deleted" tail actually play.
-  const editMap = useMemo(
-    () => buildEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims),
-    [transcript, deletedWordIds, segments, sourceDuration, clipTrims],
-  );
+  // uses to render the ripple view. Re-derived via Web Worker to unblock the UI.
+  const editMap = useEditMap(transcript, deletedWordIds, segments, sourceDuration, clipTrims);
 
   // Object URL lifecycle — created on file change, revoked on cleanup.
   useEffect(() => {
